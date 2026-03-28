@@ -6,7 +6,12 @@ from pathlib import Path
 import re
 
 load_dotenv()
-client = OpenAI()
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ.get("OPENAI_API_KEY")
+)
 
 OUTPUT_DIR = Path.home() / "ai-medical" / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
