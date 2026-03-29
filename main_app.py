@@ -676,8 +676,11 @@ with gr.Blocks(title="Clinical AI Workspace") as demo:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
+    username = os.environ.get("APP_USERNAME", "admin")
+    password = os.environ.get("APP_PASSWORD", "change-this-password")
+
     demo.launch(
         server_name="0.0.0.0",
         server_port=port,
-        auth=("123", "123")
+        auth=(username, password)
     )
