@@ -14,9 +14,8 @@ def get_client():
         raise ValueError("OPENAI_API_KEY not found")
     return OpenAI(api_key=api_key)
 
-OUTPUT_DIR = Path.home() / "ai-medical" / "outputs"
+OUTPUT_DIR = (Path.cwd() / "outputs").resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
 
 # =====================
 # Helpers
@@ -688,4 +687,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=port,
         auth=(username, password)
+        allowed_paths=[str(OUTPUT_DIR)]
     )
