@@ -676,11 +676,13 @@ with gr.Blocks(title="Clinical AI Workspace") as demo:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    username = os.environ.get("APP_USERNAME", "admin")
-    password = os.environ.get("APP_PASSWORD", "change-this-password")
+    username = os.environ.get("CLINICAL_AI_USERNAME", "admin")
+    password = os.environ.get("CLINICAL_AI_PASSWORD", "change-this-password")
 
-    print("DEBUG APP_USERNAME:", repr(username))
-    print("DEBUG APP_PASSWORD length:", len(password))
+    print("DEBUG OPENAI exists:", bool(os.environ.get("OPENAI_API_KEY")))
+    print("DEBUG CLINICAL_AI_USERNAME:", repr(username))
+    print("DEBUG CLINICAL_AI_PASSWORD length:", len(password))
+    print("DEBUG matching env keys:", [k for k in os.environ.keys() if "CLINICAL" in k or "OPENAI" in k])
 
     demo.launch(
         server_name="0.0.0.0",
