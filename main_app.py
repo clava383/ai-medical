@@ -1,4 +1,5 @@
 from dotenv import load_dotenv
+import os
 from openai import OpenAI
 import gradio as gr
 from datetime import datetime
@@ -6,13 +7,12 @@ from pathlib import Path
 import re
 
 load_dotenv()
-import os
-from openai import OpenAI
 
-import os
-client = OpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY")
-)
+def get_client():
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not found")
+    return OpenAI(api_key=api_key)
 
 OUTPUT_DIR = Path.home() / "ai-medical" / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -39,6 +39,7 @@ def save_output(tool_name: str, title_hint: str, content: str) -> str:
 
 
 def ask_model(system_prompt: str, user_input: str) -> str:
+    client = get_client()
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
@@ -508,7 +509,6 @@ def copy_history_to_or(history_text):
     return history_text
 
 
-
 # =====================
 # Clear helpers
 # =====================
@@ -673,8 +673,6 @@ with gr.Blocks(title="Clinical AI Workspace") as demo:
             clear_or,
             outputs=[or_history, or_meds, or_surgery, or_extra, or_out, or_file]
         )
-
-import os
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
