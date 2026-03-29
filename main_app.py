@@ -17,6 +17,7 @@ def get_client():
 OUTPUT_DIR = Path("/tmp/ai-medical-outputs")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+
 # =====================
 # Helpers
 # =====================
@@ -98,7 +99,9 @@ STYLE RULES:
 """
 
 OUTPUT_DIR = Path("/tmp/ai-medical-outputs")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)STAGE2_PROMPT = """
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+STAGE2_PROMPT = """
 You are a clinical admission assistant.
 
 STRICT RULES:
