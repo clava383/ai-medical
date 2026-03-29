@@ -679,6 +679,9 @@ if __name__ == "__main__":
     username = os.environ.get("APP_USERNAME", "admin")
     password = os.environ.get("APP_PASSWORD", "change-this-password")
 
+    print("DEBUG APP_USERNAME:", repr(username))
+    print("DEBUG APP_PASSWORD length:", len(password))
+
     demo.launch(
         server_name="0.0.0.0",
         server_port=port,
