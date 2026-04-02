@@ -339,6 +339,8 @@ def load_admin_user_data(current_username: str, target_username: str):
             "",
             "",
             "尚未選擇使用者。",
+            gr.update(choices=[], value=None),
+            "### Case Preview\n\n_尚未選擇 case。_",
         )
     user_record = get_user_record(target_username)
     user_db = load_db(target_username)
@@ -349,6 +351,8 @@ def load_admin_user_data(current_username: str, target_username: str):
         pretty_user,
         pretty_cases,
         f"已載入使用者資料：{target_username}",
+        gr.update(choices=admin_case_choices(target_username), value=None),
+        "### Case Preview\n\n_尚未選擇 case。_",
     )
 
 
@@ -379,6 +383,8 @@ def delete_registered_user(current_username: str, target_username: str):
         "",
         "",
         f"已刪除帳號：{target_username}",
+        gr.update(choices=[], value=None),
+        "### Case Preview\n\n_尚未選擇 case。_",
     )
 
 
@@ -1854,6 +1860,8 @@ def login_user(username: str, password: str):
         "",
         "",
         "",
+        gr.update(choices=[], value=None),
+        "### Case Preview\n\n_尚未選擇 case。_",
     )
 
 
@@ -1900,7 +1908,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     current_user_banner = gr.Markdown("### 尚未登入")
     login_status = gr.Markdown("")
     with gr.Column(visible=False) as admin_panel:
-        gr.Markdown("## Admin 後台")
+        gr.Markdown("## Admin 後台 v3")
         admin_user_search = gr.Textbox(label="搜尋帳號", placeholder="輸入 username")
         admin_user_selector = gr.Dropdown(label="選擇使用者", choices=[], value=None)
         with gr.Row():
@@ -1912,6 +1920,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
             admin_case_refresh_btn = gr.Button("刷新 Case 清單")
         admin_case_selector = gr.Dropdown(label="Case 清單預覽", choices=[], value=None)
         admin_case_preview = gr.Markdown("### Case Preview\n\n_尚未選擇 case。_")
+        gr.Markdown("可搜尋帳號、載入指定使用者資料，再搜尋與預覽該使用者的 case。")
         admin_user_json = gr.Code(label="使用者帳號資料", language="json")
         admin_cases_json = gr.Code(label="使用者所有輸入 / 輸出資料", language="json")
         admin_status = gr.Markdown("")
@@ -2066,17 +2075,17 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     login_btn.click(
         login_user,
         inputs=[login_username, login_password],
-        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
+        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
     )
     login_password.submit(
         login_user,
         inputs=[login_username, login_password],
-        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
+        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
     )
     login_username.submit(
         login_user,
         inputs=[login_username, login_password],
-        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
+        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
     )
     logout_btn.click(
         logout_user,
@@ -2089,7 +2098,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
             handoff_problem, handoff_assessment, handoff_plan, handoff_out,
-            admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status,
+            admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview,
         ],
     )
 
