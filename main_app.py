@@ -12,16 +12,19 @@ import gradio as gr
 
 load_dotenv()
 
+
 # =========================================================
 # Config
 # =========================================================
 APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "/tmp/ai-medical-data"))
-CASE_DB_PATH = APP_DATA_DIR / "cases.json"
+USERS_DB_PATH = APP_DATA_DIR / "users.json"
+USER_DATA_DIR = APP_DATA_DIR / "users"
 
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-if not CASE_DB_PATH.exists():
-    CASE_DB_PATH.write_text(json.dumps({"cases": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+if not USERS_DB_PATH.exists():
+    USERS_DB_PATH.write_text(json.dumps({"users": []}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # =========================================================
@@ -140,34 +143,119 @@ def default_case_record(mrn: str, name: str, age: str, sex: str) -> dict:
     }
 
 
-def load_db() -> dict:
+
+def sanitize_username(username: str) -> str:
+    username = (username or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+        raise gr.Error("username 需為 3-32 字元，只能包含英文、數字、底線、點或減號。")
+    return username
+
+
+def user_case_db_path(username: str) -> Path:
+    safe_username = sanitize_username(username)
+    user_dir = USER_DATA_DIR / safe_username
+    user_dir.mkdir(parents=True, exist_ok=True)
+    path = user_dir / "cases.json"
+    if not path.exists():
+        path.write_text(json.dumps({"cases": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def load_users_db() -> dict:
     try:
-        return json.loads(CASE_DB_PATH.read_text(encoding="utf-8"))
+        return json.loads(USERS_DB_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"users": []}
+
+
+def save_users_db(db: dict) -> None:
+    USERS_DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def hash_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
+    return salt.hex(), dk.hex()
+
+
+def verify_password(password: str, salt_hex: str, hash_hex: str) -> bool:
+    _, candidate = hash_password(password, salt_hex)
+    return secrets.compare_digest(candidate, hash_hex)
+
+
+def get_user_record(username: str):
+    db = load_users_db()
+    for user in db.get("users", []):
+        if user.get("username") == username:
+            return user
+    return None
+
+
+def register_user(username: str, password: str, confirm_password: str):
+    username = sanitize_username(username)
+    password = (password or "").strip()
+    confirm_password = (confirm_password or "").strip()
+
+    if len(password) < 6:
+        raise gr.Error("密碼至少需要 6 個字元。")
+    if password != confirm_password:
+        raise gr.Error("兩次輸入的密碼不一致。")
+    if get_user_record(username):
+        raise gr.Error("這個 username 已經被使用。")
+
+    db = load_users_db()
+    salt_hex, hash_hex = hash_password(password)
+    db.setdefault("users", []).append(
+        {
+            "id": str(uuid.uuid4()),
+            "username": username,
+            "password_salt": salt_hex,
+            "password_hash": hash_hex,
+            "created_at": now_iso(),
+        }
+    )
+    save_users_db(db)
+    user_case_db_path(username)
+    return f"註冊成功：{username}，現在可以登入。"
+
+
+def authenticate_user(username: str, password: str) -> bool:
+    username = (username or "").strip()
+    password = (password or "").strip()
+    user = get_user_record(username)
+    if not user:
+        return False
+    return verify_password(password, user["password_salt"], user["password_hash"])
+
+
+def load_db(username: str) -> dict:
+    try:
+        return json.loads(user_case_db_path(username).read_text(encoding="utf-8"))
     except Exception:
         return {"cases": []}
 
 
-def save_db(db: dict) -> None:
-    CASE_DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_db(username: str, db: dict) -> None:
+    user_case_db_path(username).write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def get_case_by_id(case_id: str):
-    db = load_db()
+def get_case_by_id(username: str, case_id: str):
+    db = load_db(username)
     for case in db.get("cases", []):
         if case["id"] == case_id:
             return case
     return None
 
 
-def update_case(case_id: str, mutate_fn):
-    db = load_db()
+def update_case(username: str, case_id: str, mutate_fn):
+    db = load_db(username)
     for idx, case in enumerate(db.get("cases", [])):
         if case["id"] == case_id:
             case_copy = deepcopy(case)
             mutate_fn(case_copy)
             case_copy["updated_at"] = now_iso()
             db["cases"][idx] = case_copy
-            save_db(db)
+            save_db(username, db)
             return case_copy
     raise ValueError("Case not found")
 
@@ -483,8 +571,9 @@ def case_label(case: dict) -> str:
     return f"{status_icon} {case.get('mrn', '')} | {case.get('name', '')} | {case.get('age', '')} | {case.get('sex', '')}"
 
 
-def get_filtered_cases(status_filter: str = "Active", keyword: str = ""):
-    db = load_db()
+def get_filtered_cases(username: str, status_filter: str = "Active", keyword: str = ""):
+    username = require_user(username)
+    db = load_db(username)
     status_map = {
         "Active": "active",
         "Discharged": "discharged",
@@ -511,12 +600,14 @@ def get_filtered_cases(status_filter: str = "Active", keyword: str = ""):
     return filtered
 
 
-def sidebar_case_choices(status_filter: str = "Active", keyword: str = ""):
-    return [(case_label(c), c["id"]) for c in get_filtered_cases(status_filter, keyword)]
+def sidebar_case_choices(username: str, status_filter: str = "Active", keyword: str = ""):
+    return [(case_label(c), c["id"]) for c in get_filtered_cases(username, status_filter, keyword)]
 
 
-def sidebar_case_list_md(status_filter: str = "Active", keyword: str = "") -> str:
-    cases = get_filtered_cases(status_filter, keyword)
+def sidebar_case_list_md(username: str, status_filter: str = "Active", keyword: str = "") -> str:
+    if not username:
+        return "### Cases\n\n_請先登入._"
+    cases = get_filtered_cases(username, status_filter, keyword)
     title = f"### {status_filter} Cases"
     if keyword:
         title += f" · search: `{keyword}`"
@@ -551,22 +642,38 @@ def patient_summary_md(case: dict | None) -> str:
     )
 
 
-def require_case(case_id: str):
+
+def require_user(username: str) -> str:
+    username = (username or "").strip()
+    if not username:
+        raise gr.Error("請先登入。")
+    return username
+
+
+def current_user_md(username: str) -> str:
+    username = (username or "").strip()
+    return f"### 使用者：{username}" if username else "### 尚未登入"
+
+
+def require_case(username: str, case_id: str):
+    username = require_user(username)
     if not case_id:
         raise gr.Error("請先從左側選擇一個 case。")
-    case = get_case_by_id(case_id)
+    case = get_case_by_id(username, case_id)
     if not case:
         raise gr.Error("找不到這個 case。")
     return case
 
 
-def sync_sidebar(status_filter: str, keyword: str, selected_case_id: str | None = None):
-    choices = sidebar_case_choices(status_filter, keyword)
+def sync_sidebar(username: str, status_filter: str, keyword: str, selected_case_id: str | None = None):
+    if not username:
+        return (gr.update(choices=[], value=None), "### Cases\n\n_請先登入._", None)
+    choices = sidebar_case_choices(username, status_filter, keyword)
     valid_ids = [value for _, value in choices]
     value = selected_case_id if selected_case_id in valid_ids else (valid_ids[0] if valid_ids else None)
     return (
         gr.update(choices=choices, value=value),
-        sidebar_case_list_md(status_filter, keyword),
+        sidebar_case_list_md(username, status_filter, keyword),
         value,
     )
 
@@ -1073,7 +1180,7 @@ STYLE:
 # =========================================================
 # Case management
 # =========================================================
-def create_case(mrn, name, age, sex, status_filter, keyword):
+def create_case(username, mrn, name, age, sex, status_filter, keyword):
     mrn = (mrn or "").strip()
     name = (name or "").strip()
     age = (age or "").strip()
@@ -1082,16 +1189,17 @@ def create_case(mrn, name, age, sex, status_filter, keyword):
     if not mrn or not name or not age or not sex:
         raise gr.Error("請完整填寫 病歷號、姓名、年齡、性別。")
 
-    db = load_db()
+    username = require_user(username)
+    db = load_db(username)
     for case in db.get("cases", []):
         if case.get("mrn") == mrn and case.get("status") == "active":
             raise gr.Error("已有相同病歷號的 active case。")
 
     case = default_case_record(mrn, name, age, sex)
     db["cases"].append(case)
-    save_db(db)
+    save_db(username, db)
 
-    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(status_filter, keyword, case["id"])
+    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, status_filter, keyword, case["id"])
     return (
         sidebar_dropdown,
         sidebar_md,
@@ -1102,8 +1210,8 @@ def create_case(mrn, name, age, sex, status_filter, keyword):
     )
 
 
-def load_selected_case(case_id):
-    case = require_case(case_id)
+def load_selected_case(username, case_id):
+    case = require_case(username, case_id)
     s1 = case["admission"]["stage1"]
     s2 = case["admission"]["stage2"]
     weekly = case["weekly"]
@@ -1127,10 +1235,10 @@ def load_selected_case(case_id):
     )
 
 
-def move_case_to_archive(case_id, status_filter, keyword):
-    case = require_case(case_id)
+def move_case_to_archive(username, case_id, status_filter, keyword):
+    case = require_case(username, case_id)
     if case.get("status") == "discharged":
-        sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(status_filter, keyword, case_id)
+        sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, status_filter, keyword, case_id)
         return (
             sidebar_dropdown,
             sidebar_md,
@@ -1139,8 +1247,8 @@ def move_case_to_archive(case_id, status_filter, keyword):
             "此 case 已經在已出院區。",
         )
 
-    updated = update_case(case_id, lambda c: c.update({"status": "discharged", "discharged_at": now_iso()}))
-    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(status_filter, keyword, updated["id"])
+    updated = update_case(username, case_id, lambda c: c.update({"status": "discharged", "discharged_at": now_iso()}))
+    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, status_filter, keyword, updated["id"])
     return (
         sidebar_dropdown,
         sidebar_md,
@@ -1150,10 +1258,10 @@ def move_case_to_archive(case_id, status_filter, keyword):
     )
 
 
-def restore_case(case_id, status_filter, keyword):
-    case = require_case(case_id)
-    updated = update_case(case_id, lambda c: c.update({"status": "active", "discharged_at": ""}))
-    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(status_filter, keyword, updated["id"])
+def restore_case(username, case_id, status_filter, keyword):
+    case = require_case(username, case_id)
+    updated = update_case(username, case_id, lambda c: c.update({"status": "active", "discharged_at": ""}))
+    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, status_filter, keyword, updated["id"])
     return (
         sidebar_dropdown,
         sidebar_md,
@@ -1163,14 +1271,15 @@ def restore_case(case_id, status_filter, keyword):
     )
 
 
-def delete_case(case_id, status_filter, keyword):
-    case = require_case(case_id)
-    db = load_db()
+def delete_case(username, case_id, status_filter, keyword):
+    case = require_case(username, case_id)
+    username = require_user(username)
+    db = load_db(username)
     db["cases"] = [c for c in db.get("cases", []) if c.get("id") != case_id]
-    save_db(db)
+    save_db(username, db)
 
 
-    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(status_filter, keyword, None)
+    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, status_filter, keyword, None)
     return (
         sidebar_dropdown,
         sidebar_md,
@@ -1188,6 +1297,7 @@ def delete_case(case_id, status_filter, keyword):
 
 
 def save_workspace(
+    username,
     case_id,
     chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, checklist1,
     chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
@@ -1196,9 +1306,10 @@ def save_workspace(
     or_history, or_meds, or_surgery, or_extra, or_out,
     handoff_problem, handoff_assessment, handoff_plan, handoff_out,
 ):
-    case = require_case(case_id)
+    case = require_case(username, case_id)
 
     updated = update_case(
+        username,
         case_id,
         lambda c: (
             c["admission"]["stage1"].update({
@@ -1256,15 +1367,15 @@ def save_workspace(
 
     return patient_summary_md(updated), f"Workspace saved: {updated['mrn']} / {updated['name']}"
 
-def refresh_sidebar_ui(status_filter, keyword, selected_case_id):
-    return sync_sidebar(status_filter, keyword, selected_case_id)
+def refresh_sidebar_ui(username, status_filter, keyword, selected_case_id):
+    return sync_sidebar(username, status_filter, keyword, selected_case_id)
 
 
 # =========================================================
 # Core workflow functions
 # =========================================================
-def admission_stage1(case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, labs):
-    case = require_case(case_id)
+def admission_stage1(username, case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, labs):
+    case = require_case(username, case_id)
     user_input = f"""
 Chief complaint: {chief_complaint}
 
@@ -1290,6 +1401,7 @@ Labs / imaging:
     ).strip()
 
     updated = update_case(
+        username,
         case_id,
         lambda c: c["admission"]["stage1"].update(
             {
@@ -1308,8 +1420,8 @@ Labs / imaging:
     return timeline_output, checklist_output, patient_summary_md(updated)
 
 
-def admission_stage2(case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, timeline_text, labs, additional_history, pe_findings, extra_data):
-    case = require_case(case_id)
+def admission_stage2(username, case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, timeline_text, labs, additional_history, pe_findings, extra_data):
+    case = require_case(username, case_id)
 
     forced_active_dx, forced_underlying_dx, plan_active_dx, forced_admission_date = build_forced_diagnosis_sections(
         chief_complaint,
@@ -1366,6 +1478,7 @@ Additional data:
     result = ask_model(STAGE2_PROMPT, user_input)
 
     updated = update_case(
+        username,
         case_id,
         lambda c: c["admission"]["stage2"].update(
             {
@@ -1388,8 +1501,8 @@ Additional data:
 
 
 
-def handoff_summary(case_id, problem, assessment, plan):
-    case = require_case(case_id)
+def handoff_summary(username, case_id, problem, assessment, plan):
+    case = require_case(username, case_id)
     user_input = f"""
 Problem:
 {problem}
@@ -1403,6 +1516,7 @@ Plan:
     result = ask_model(HANDOFF_PROMPT, user_input)
 
     updated = update_case(
+        username,
         case_id,
         lambda c: c.setdefault("handoff", {}).update(
             {
@@ -1416,8 +1530,8 @@ Plan:
     return result, patient_summary_md(updated)
 
 
-def weekly_summary(case_id, events, previous_weekly):
-    case = require_case(case_id)
+def weekly_summary(username, case_id, events, previous_weekly):
+    case = require_case(username, case_id)
     user_input = f"""
 Weekly events and timeline:
 {events}
@@ -1428,6 +1542,7 @@ Previous weekly summary (if any):
     result = ask_model(WEEKLY_PROMPT, user_input)
 
     updated = update_case(
+        username,
         case_id,
         lambda c: c["weekly"].update(
             {
@@ -1440,8 +1555,8 @@ Previous weekly summary (if any):
     return result, patient_summary_md(updated), result
 
 
-def discharge_note(case_id, weekly, final_events):
-    case = require_case(case_id)
+def discharge_note(username, case_id, weekly, final_events):
+    case = require_case(username, case_id)
     user_input = f"""
 Weekly summaries:
 {weekly}
@@ -1452,6 +1567,7 @@ Final week events and timeline:
     result = ask_model(DISCHARGE_PROMPT, user_input)
 
     updated = update_case(
+        username,
         case_id,
         lambda c: c["discharge"].update(
             {
@@ -1464,8 +1580,8 @@ Final week events and timeline:
     return result, patient_summary_md(updated)
 
 
-def or_briefing(case_id, history, meds, surgery, extra):
-    case = require_case(case_id)
+def or_briefing(username, case_id, history, meds, surgery, extra):
+    case = require_case(username, case_id)
     user_input = f"""
 Patient history:
 {history}
@@ -1482,6 +1598,7 @@ Additional info:
     result = ask_model(OR_PROMPT, user_input)
 
     updated = update_case(
+        username,
         case_id,
         lambda c: c["or_briefing"].update(
             {
@@ -1519,167 +1636,248 @@ def autofill_or_history(stage2_history_text, stage1_history_text, current_or_his
     return current_or_history or stage2_history_text or stage1_history_text
 
 
+
+
 # =========================================================
-# UI
+# Session / UI helpers
 # =========================================================
-with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()) as demo:
+def login_user(username: str, password: str):
+    username = (username or "").strip()
+    if not authenticate_user(username, password):
+        raise gr.Error("登入失敗，請確認 username / password。")
+    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, "Active", "", None)
+    return (
+        username,
+        current_user_md(username),
+        gr.update(visible=False),
+        gr.update(visible=True),
+        sidebar_dropdown,
+        sidebar_md,
+        selected_case_id,
+        "登入成功。",
+        "",
+        "",
+    )
+
+
+def logout_user():
+    return (
+        "",
+        current_user_md(""),
+        gr.update(visible=True),
+        gr.update(visible=False),
+        gr.update(choices=[], value=None),
+        "### Cases\n\n_請先登入._",
+        None,
+        "已登出。",
+        "### No case selected\n請先登入。",
+        *empty_stage1(),
+        *empty_stage2(),
+        *empty_weekly(),
+        *empty_discharge(),
+        *empty_or(),
+        *empty_handoff(),
+    )
+
+
+with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
+    user_state = gr.State("")
     selected_case_id = gr.State("")
 
-    gr.Markdown("# Clinical AI Workspace")
-    gr.Markdown("Dashboard 版：左側病人列表，右側病人專屬頁面")
+    current_user_banner = gr.Markdown("### 尚未登入")
+    login_status = gr.Markdown("")
 
-    with gr.Row(equal_height=False):
-        with gr.Column(scale=1, min_width=340):
-            gr.Markdown("## Patient Dashboard")
-            status_filter = gr.Radio(
-                choices=["Active", "Discharged", "All"],
-                value="Active",
-                label="Case Filter",
-            )
-            case_search = gr.Textbox(label="Search Case", placeholder="輸入病歷號 / 姓名 / 年齡 / 性別")
-            refresh_sidebar_btn = gr.Button("Refresh List")
-            case_selector = gr.Radio(
-                choices=sidebar_case_choices("Active", ""),
-                value=None,
-                label="病人列表（病歷號｜姓名｜年齡｜性別）",
-                interactive=True,
-            )
-            load_case_btn = gr.Button("Load Selected Case", variant="primary")
-            case_list_preview = gr.Markdown(sidebar_case_list_md("Active", ""))
+    with gr.Column(visible=True) as login_panel:
+        gr.Markdown("# Clinical AI Workspace")
+        with gr.Row():
+            login_username = gr.Textbox(label="Username")
+            login_password = gr.Textbox(label="Password", type="password")
+        with gr.Row():
+            login_btn = gr.Button("Login", variant="primary")
+        with gr.Accordion("註冊 / Register", open=False):
+            register_username = gr.Textbox(label="New Username")
+            register_password = gr.Textbox(label="New Password", type="password")
+            register_password_confirm = gr.Textbox(label="Confirm Password", type="password")
+            register_btn = gr.Button("Register")
+            register_status = gr.Markdown("")
 
-            with gr.Accordion("新增病人 / Create Case", open=False):
-                new_mrn = gr.Textbox(label="病歷號 MRN")
-                new_name = gr.Textbox(label="姓名 Name")
-                new_age = gr.Textbox(label="年齡 Age")
-                new_sex = gr.Dropdown(choices=["M", "F", "Other"], label="性別 Sex")
-                create_case_btn = gr.Button("Create Case")
+    with gr.Column(visible=False) as app_panel:
+        gr.Markdown("# Clinical AI Workspace")
 
-        with gr.Column(scale=3, min_width=900):
-            case_summary = gr.Markdown("### No case selected\n請先從左側病人列表選擇一個 case。")
-            with gr.Row():
-                discharge_case_btn = gr.Button("Move to Discharged Archive")
-                restore_case_btn = gr.Button("Restore to Active")
-                delete_case_btn = gr.Button("Delete Case", variant="stop")
-            with gr.Row():
-                save_workspace_btn = gr.Button("💾 Save Workspace")
-                reload_workspace_btn = gr.Button("🔄 Reload Workspace")
-            case_status_message = gr.Markdown("")
+        with gr.Row(equal_height=False):
+            with gr.Column(scale=1, min_width=340):
+                status_filter = gr.Radio(
+                    choices=["Active", "Discharged", "All"],
+                    value="Active",
+                    label="Case Filter",
+                )
+                case_search = gr.Textbox(label="Search Case", placeholder="輸入病歷號 / 姓名 / 年齡 / 性別")
+                refresh_sidebar_btn = gr.Button("Refresh List")
+                case_selector = gr.Radio(
+                    choices=[],
+                    value=None,
+                    label="病人列表（病歷號｜姓名｜年齡｜性別）",
+                    interactive=True,
+                )
+                load_case_btn = gr.Button("Load Selected Case", variant="primary")
+                logout_btn = gr.Button("Logout")
+                case_list_preview = gr.Markdown("### Cases\n\n_請先登入._")
 
-            with gr.Tabs():
-                with gr.Tab("Admission Copilot"):
-                    gr.Markdown("## Stage 1: Interview Guide")
-                    with gr.Row():
-                        chief1 = gr.Textbox(label="Chief Complaint")
-                        purpose1 = gr.Textbox(label="Admission Purpose")
-                    history1 = gr.Textbox(label="Known History / Previous Notes (中英皆可)", lines=10)
-                    outpatient1 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
-                    emergency1 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
-                    labs1 = gr.Textbox(label="Labs / Imaging (brief)", lines=5)
+                with gr.Accordion("新增病人 / Create Case", open=False):
+                    new_mrn = gr.Textbox(label="病歷號 MRN")
+                    new_name = gr.Textbox(label="姓名 Name")
+                    new_age = gr.Textbox(label="年齡 Age")
+                    new_sex = gr.Dropdown(choices=["M", "F", "Other"], label="性別 Sex")
+                    create_case_btn = gr.Button("Create Case")
 
-                    with gr.Row():
-                        btn1 = gr.Button("Generate Interview Guide")
-                        btn1_clear = gr.Button("Clear")
+            with gr.Column(scale=3, min_width=900):
+                case_summary = gr.Markdown("### No case selected\n請先從左側病人列表選擇一個 case。")
+                with gr.Row():
+                    discharge_case_btn = gr.Button("Move to Discharged Archive")
+                    restore_case_btn = gr.Button("Restore to Active")
+                    delete_case_btn = gr.Button("Delete Case", variant="stop")
+                with gr.Row():
+                    save_workspace_btn = gr.Button("💾 Save Workspace")
+                    reload_workspace_btn = gr.Button("🔄 Reload Workspace")
+                case_status_message = gr.Markdown("")
 
-                    with gr.Row():
-                        timeline1 = gr.Textbox(label="Current History Timeline", lines=18)
-                        output1 = gr.Textbox(label="Admission Checklist", lines=18)
+                with gr.Tabs():
+                    with gr.Tab("Admission Copilot"):
+                        gr.Markdown("## Stage 1: Interview Guide")
+                        with gr.Row():
+                            chief1 = gr.Textbox(label="Chief Complaint")
+                            purpose1 = gr.Textbox(label="Admission Purpose")
+                        history1 = gr.Textbox(label="Known History / Previous Notes (中英皆可)", lines=10)
+                        outpatient1 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
+                        emergency1 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
+                        labs1 = gr.Textbox(label="Labs / Imaging (brief)", lines=5)
 
-                    gr.Markdown("## Stage 2: Final Admission Note")
-                    with gr.Row():
-                        chief2 = gr.Textbox(label="Chief Complaint")
-                        purpose2 = gr.Textbox(label="Admission Purpose")
-                    history2 = gr.Textbox(label="Known History / Previous Notes", lines=10)
-                    outpatient2 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
-                    emergency2 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
-                    timeline2 = gr.Textbox(label="Current History Timeline", lines=6)
-                    labs2 = gr.Textbox(label="Labs / Imaging", lines=5)
-                    add_hist = gr.Textbox(label="Additional History Obtained", lines=5)
-                    pe2 = gr.Textbox(label="Physical Examination Findings", lines=5)
-                    extra2 = gr.Textbox(label="Additional Data", lines=5)
+                        with gr.Row():
+                            btn1 = gr.Button("Generate Interview Guide")
+                            btn1_clear = gr.Button("Clear")
 
-                    with gr.Row():
-                        btn_copy_to_stage2 = gr.Button("Copy Stage 1 Inputs to Stage 2")
-                        btn2 = gr.Button("Generate Final Admission Note")
-                        btn2_clear = gr.Button("Clear")
+                        with gr.Row():
+                            timeline1 = gr.Textbox(label="Current History Timeline", lines=18)
+                            output1 = gr.Textbox(label="Admission Checklist", lines=18)
 
-                    output2 = gr.Textbox(label="Final Admission Note", lines=30)
+                        gr.Markdown("## Stage 2: Final Admission Note")
+                        with gr.Row():
+                            chief2 = gr.Textbox(label="Chief Complaint")
+                            purpose2 = gr.Textbox(label="Admission Purpose")
+                        history2 = gr.Textbox(label="Known History / Previous Notes", lines=10)
+                        outpatient2 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
+                        emergency2 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
+                        timeline2 = gr.Textbox(label="Current History Timeline", lines=6)
+                        labs2 = gr.Textbox(label="Labs / Imaging", lines=5)
+                        add_hist = gr.Textbox(label="Additional History Obtained", lines=5)
+                        pe2 = gr.Textbox(label="Physical Examination Findings", lines=5)
+                        extra2 = gr.Textbox(label="Additional Data", lines=5)
 
-                with gr.Tab("交班摘要"):
-                    handoff_problem = gr.Textbox(label="Problem", lines=6)
-                    handoff_assessment = gr.Textbox(label="Assessment", lines=6)
-                    handoff_plan = gr.Textbox(label="Plan", lines=6)
+                        with gr.Row():
+                            btn_copy_to_stage2 = gr.Button("Copy Stage 1 Inputs to Stage 2")
+                            btn2 = gr.Button("Generate Final Admission Note")
+                            btn2_clear = gr.Button("Clear")
 
-                    with gr.Row():
-                        handoff_btn = gr.Button("Generate Handoff Summary")
-                        handoff_clear = gr.Button("Clear")
+                        output2 = gr.Textbox(label="Final Admission Note", lines=30)
 
-                    handoff_out = gr.Textbox(label="交班摘要 Handoff Summary", lines=24)
+                    with gr.Tab("交班摘要"):
+                        handoff_problem = gr.Textbox(label="Problem", lines=6)
+                        handoff_assessment = gr.Textbox(label="Assessment", lines=6)
+                        handoff_plan = gr.Textbox(label="Plan", lines=6)
 
-                with gr.Tab("Weekly Summary"):
-                    weekly_events = gr.Textbox(label="This week's events & timeline", lines=15)
-                    weekly_prev = gr.Textbox(label="Previous weekly summary (optional)", lines=10)
+                        with gr.Row():
+                            handoff_btn = gr.Button("Generate Handoff Summary")
+                            handoff_clear = gr.Button("Clear")
 
-                    with gr.Row():
-                        weekly_btn = gr.Button("Generate Weekly Summary")
-                        weekly_clear = gr.Button("Clear")
+                        handoff_out = gr.Textbox(label="交班摘要 Handoff Summary", lines=24)
 
-                    weekly_out = gr.Textbox(label="Weekly Summary", lines=25)
+                    with gr.Tab("Weekly Summary"):
+                        weekly_events = gr.Textbox(label="This week's events & timeline", lines=15)
+                        weekly_prev = gr.Textbox(label="Previous weekly summary (optional)", lines=10)
 
-                with gr.Tab("Discharge Note"):
-                    discharge_weekly = gr.Textbox(label="All weekly summaries (optional)", lines=15)
-                    discharge_events = gr.Textbox(label="Final week events & timeline", lines=10)
+                        with gr.Row():
+                            weekly_btn = gr.Button("Generate Weekly Summary")
+                            weekly_clear = gr.Button("Clear")
 
-                    with gr.Row():
-                        discharge_copy = gr.Button("Copy Weekly Output Here")
-                        discharge_autofill = gr.Button("Auto-fill from Weekly")
-                        discharge_btn = gr.Button("Generate Course and Treatment")
-                        discharge_clear = gr.Button("Clear")
+                        weekly_out = gr.Textbox(label="Weekly Summary", lines=25)
 
-                    discharge_out = gr.Textbox(label="Course and Treatment", lines=20)
+                    with gr.Tab("Discharge Note"):
+                        discharge_weekly = gr.Textbox(label="All weekly summaries (optional)", lines=15)
+                        discharge_events = gr.Textbox(label="Final week events & timeline", lines=10)
 
+                        with gr.Row():
+                            discharge_copy = gr.Button("Copy Weekly Output Here")
+                            discharge_autofill = gr.Button("Auto-fill from Weekly")
+                            discharge_btn = gr.Button("Generate Course and Treatment")
+                            discharge_clear = gr.Button("Clear")
 
-                with gr.Tab("OR Briefing"):
-                    or_history = gr.Textbox(label="Brief History（病史）", lines=6)
-                    or_meds = gr.Textbox(label="Current Medications（用藥）", lines=5)
-                    or_surgery = gr.Textbox(label="Planned Surgery（手術名稱）", lines=3)
-                    or_extra = gr.Textbox(label="Additional Info（labs / image 可選）", lines=5)
+                        discharge_out = gr.Textbox(label="Course and Treatment", lines=20)
 
-                    with gr.Row():
-                        or_copy_history = gr.Button("Copy Admission History Here")
-                        or_autofill = gr.Button("Auto-fill Admission History")
-                        or_btn = gr.Button("Generate OR Briefing")
-                        or_clear = gr.Button("Clear")
+                    with gr.Tab("OR Briefing"):
+                        or_history = gr.Textbox(label="Brief History（病史）", lines=6)
+                        or_meds = gr.Textbox(label="Current Medications（用藥）", lines=5)
+                        or_surgery = gr.Textbox(label="Planned Surgery（手術名稱）", lines=3)
+                        or_extra = gr.Textbox(label="Additional Info（labs / image 可選）", lines=5)
 
-                    or_out = gr.Textbox(label="OR Briefing", lines=30)
+                        with gr.Row():
+                            or_copy_history = gr.Button("Copy Admission History Here")
+                            or_autofill = gr.Button("Auto-fill Admission History")
+                            or_btn = gr.Button("Generate OR Briefing")
+                            or_clear = gr.Button("Clear")
+
+                        or_out = gr.Textbox(label="OR Briefing", lines=30)
+
+    # auth
+    register_btn.click(
+        register_user,
+        inputs=[register_username, register_password, register_password_confirm],
+        outputs=[register_status],
+    )
+    login_btn.click(
+        login_user,
+        inputs=[login_username, login_password],
+        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password],
+    )
+    logout_btn.click(
+        logout_user,
+        outputs=[
+            user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview,
+            selected_case_id, login_status, case_summary,
+            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            weekly_events, weekly_prev, weekly_out,
+            discharge_weekly, discharge_events, discharge_out,
+            or_history, or_meds, or_surgery, or_extra, or_out,
+            handoff_problem, handoff_assessment, handoff_plan, handoff_out,
+        ],
+    )
 
     # Sidebar refresh / filter
     status_filter.change(
         refresh_sidebar_ui,
-        inputs=[status_filter, case_search, selected_case_id],
+        inputs=[user_state, status_filter, case_search, selected_case_id],
         outputs=[case_selector, case_list_preview, selected_case_id],
     )
     case_search.submit(
         refresh_sidebar_ui,
-        inputs=[status_filter, case_search, selected_case_id],
+        inputs=[user_state, status_filter, case_search, selected_case_id],
         outputs=[case_selector, case_list_preview, selected_case_id],
     )
     refresh_sidebar_btn.click(
         refresh_sidebar_ui,
-        inputs=[status_filter, case_search, selected_case_id],
+        inputs=[user_state, status_filter, case_search, selected_case_id],
         outputs=[case_selector, case_list_preview, selected_case_id],
     )
 
-    # Create case
     create_case_btn.click(
         create_case,
-        inputs=[new_mrn, new_name, new_age, new_sex, status_filter, case_search],
+        inputs=[user_state, new_mrn, new_name, new_age, new_sex, status_filter, case_search],
         outputs=[case_selector, case_list_preview, selected_case_id, case_summary, new_mrn, new_name, new_age, new_sex, case_status_message],
     )
 
-    # Load case
     load_case_btn.click(
         load_selected_case,
-        inputs=[case_selector],
+        inputs=[user_state, case_selector],
         outputs=[
             selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
@@ -1693,7 +1891,7 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
     )
     case_selector.change(
         load_selected_case,
-        inputs=[case_selector],
+        inputs=[user_state, case_selector],
         outputs=[
             selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
@@ -1706,11 +1904,10 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
         ],
     )
 
-    # Workspace save / reload
     save_workspace_btn.click(
         save_workspace,
         inputs=[
-            selected_case_id,
+            user_state, selected_case_id,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
             chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
             weekly_events, weekly_prev, weekly_out,
@@ -1722,7 +1919,7 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
     )
     reload_workspace_btn.click(
         load_selected_case,
-        inputs=[selected_case_id],
+        inputs=[user_state, selected_case_id],
         outputs=[
             selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
@@ -1735,20 +1932,19 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
         ],
     )
 
-    # Archive / restore
     discharge_case_btn.click(
         move_case_to_archive,
-        inputs=[selected_case_id, status_filter, case_search],
+        inputs=[user_state, selected_case_id, status_filter, case_search],
         outputs=[case_selector, case_list_preview, selected_case_id, case_summary, case_status_message],
     )
     restore_case_btn.click(
         restore_case,
-        inputs=[selected_case_id, status_filter, case_search],
+        inputs=[user_state, selected_case_id, status_filter, case_search],
         outputs=[case_selector, case_list_preview, selected_case_id, case_summary, case_status_message],
     )
     delete_case_btn.click(
         delete_case,
-        inputs=[selected_case_id, status_filter, case_search],
+        inputs=[user_state, selected_case_id, status_filter, case_search],
         outputs=[
             case_selector, case_list_preview, selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
@@ -1761,16 +1957,12 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
         ],
     )
 
-    # Workflow actions
     btn1.click(
         admission_stage1,
-        inputs=[selected_case_id, chief1, purpose1, history1, outpatient1, emergency1, labs1],
+        inputs=[user_state, selected_case_id, chief1, purpose1, history1, outpatient1, emergency1, labs1],
         outputs=[timeline1, output1, case_summary],
     )
-    btn1_clear.click(
-        lambda: empty_stage1(),
-        outputs=[chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1],
-    )
+    btn1_clear.click(lambda: empty_stage1(), outputs=[chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1])
 
     btn_copy_to_stage2.click(
         copy_stage1_to_stage2,
@@ -1779,29 +1971,19 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
     )
     btn2.click(
         admission_stage2,
-        inputs=[selected_case_id, chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2],
+        inputs=[user_state, selected_case_id, chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2],
         outputs=[output2, case_summary, or_history],
     )
-    btn2_clear.click(
-        lambda: empty_stage2(),
-        outputs=[chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2],
-    )
+    btn2_clear.click(lambda: empty_stage2(), outputs=[chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2])
 
     weekly_btn.click(
         weekly_summary,
-        inputs=[selected_case_id, weekly_events, weekly_prev],
+        inputs=[user_state, selected_case_id, weekly_events, weekly_prev],
         outputs=[weekly_out, case_summary, discharge_weekly],
     )
-    weekly_clear.click(
-        lambda: empty_weekly(),
-        outputs=[weekly_events, weekly_prev, weekly_out],
-    )
+    weekly_clear.click(lambda: empty_weekly(), outputs=[weekly_events, weekly_prev, weekly_out])
 
-    discharge_copy.click(
-        copy_weekly_to_discharge,
-        inputs=[weekly_out],
-        outputs=[discharge_weekly],
-    )
+    discharge_copy.click(copy_weekly_to_discharge, inputs=[weekly_out], outputs=[discharge_weekly])
     discharge_autofill.click(
         autofill_discharge_from_weekly,
         inputs=[weekly_out, discharge_weekly],
@@ -1809,30 +1991,19 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
     )
     discharge_btn.click(
         discharge_note,
-        inputs=[selected_case_id, discharge_weekly, discharge_events],
+        inputs=[user_state, selected_case_id, discharge_weekly, discharge_events],
         outputs=[discharge_out, case_summary],
     )
-    discharge_clear.click(
-        lambda: empty_discharge(),
-        outputs=[discharge_weekly, discharge_events, discharge_out],
-    )
-
+    discharge_clear.click(lambda: empty_discharge(), outputs=[discharge_weekly, discharge_events, discharge_out])
 
     handoff_btn.click(
         handoff_summary,
-        inputs=[selected_case_id, handoff_problem, handoff_assessment, handoff_plan],
+        inputs=[user_state, selected_case_id, handoff_problem, handoff_assessment, handoff_plan],
         outputs=[handoff_out, case_summary],
     )
-    handoff_clear.click(
-        lambda: empty_handoff(),
-        outputs=[handoff_problem, handoff_assessment, handoff_plan, handoff_out],
-    )
+    handoff_clear.click(lambda: empty_handoff(), outputs=[handoff_problem, handoff_assessment, handoff_plan, handoff_out])
 
-    or_copy_history.click(
-        copy_history_to_or,
-        inputs=[history2],
-        outputs=[or_history],
-    )
+    or_copy_history.click(copy_history_to_or, inputs=[history2], outputs=[or_history])
     or_autofill.click(
         autofill_or_history,
         inputs=[history2, history1, or_history],
@@ -1840,27 +2011,20 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
     )
     or_btn.click(
         or_briefing,
-        inputs=[selected_case_id, or_history, or_meds, or_surgery, or_extra],
+        inputs=[user_state, selected_case_id, or_history, or_meds, or_surgery, or_extra],
         outputs=[or_out, case_summary],
     )
-    or_clear.click(
-        lambda: empty_or(),
-        outputs=[or_history, or_meds, or_surgery, or_extra, or_out],
-    )
+    or_clear.click(lambda: empty_or(), outputs=[or_history, or_meds, or_surgery, or_extra, or_out])
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    username = os.environ.get("CLINICAL_AI_USERNAME", "1")
-    password = os.environ.get("CLINICAL_AI_PASSWORD", "1")
 
     print("DEBUG OPENAI exists:", bool(os.environ.get("OPENAI_API_KEY")))
     print("DEBUG APP_DATA_DIR:", APP_DATA_DIR)
-    print("DEBUG matching env keys:", [k for k in os.environ.keys() if "CLINICAL" in k or "OPENAI" in k or "APP_DATA" in k])
+    print("DEBUG USERS_DB_PATH:", USERS_DB_PATH)
 
     demo.launch(
         server_name="0.0.0.0",
         server_port=port,
-        auth=(username, password),
-        allowed_paths=[str(APP_DATA_DIR)],
     )
