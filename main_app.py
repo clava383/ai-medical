@@ -16,11 +16,9 @@ load_dotenv()
 # Config
 # =========================================================
 APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "/tmp/ai-medical-data"))
-CASE_OUTPUT_DIR = APP_DATA_DIR / "outputs"
 CASE_DB_PATH = APP_DATA_DIR / "cases.json"
 
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
-CASE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 if not CASE_DB_PATH.exists():
     CASE_DB_PATH.write_text(json.dumps({"cases": []}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -56,23 +54,27 @@ def empty_case_form():
 
 
 def empty_stage1():
-    return "", "", "", "", "", "", "", None
+    return "", "", "", "", "", "", "", ""
 
 
 def empty_stage2():
-    return "", "", "", "", "", "", "", "", "", "", None
+    return "", "", "", "", "", "", "", "", "", "", ""
 
 
 def empty_weekly():
-    return "", "", "", None
+    return "", "", ""
 
 
 def empty_discharge():
-    return "", "", "", None
+    return "", "", ""
 
 
 def empty_or():
-    return "", "", "", "", "", None
+    return "", "", "", "", ""
+
+
+def empty_handoff():
+    return "", "", "", ""
 
 
 def default_case_record(mrn: str, name: str, age: str, sex: str) -> dict:
@@ -92,37 +94,35 @@ def default_case_record(mrn: str, name: str, age: str, sex: str) -> dict:
                 "admission_purpose": "",
                 "history_text": "",
                 "outpatient_notes": "",
+                "emergency_notes": "",
                 "labs": "",
                 "timeline_output": "",
                 "checklist_output": "",
                 "output": "",
-                "file_path": "",
             },
             "stage2": {
                 "chief_complaint": "",
                 "admission_purpose": "",
                 "history_text": "",
                 "outpatient_notes": "",
+                "emergency_notes": "",
                 "timeline_text": "",
                 "labs": "",
                 "additional_history": "",
                 "pe_findings": "",
                 "extra_data": "",
                 "output": "",
-                "file_path": "",
             },
         },
         "weekly": {
             "events": "",
             "previous_weekly": "",
             "output": "",
-            "file_path": "",
         },
         "discharge": {
             "weekly": "",
             "final_events": "",
             "output": "",
-            "file_path": "",
         },
         "or_briefing": {
             "history": "",
@@ -130,7 +130,12 @@ def default_case_record(mrn: str, name: str, age: str, sex: str) -> dict:
             "surgery": "",
             "extra": "",
             "output": "",
-            "file_path": "",
+        },
+        "handoff": {
+            "problem": "",
+            "assessment": "",
+            "plan": "",
+            "output": "",
         },
     }
 
@@ -165,17 +170,6 @@ def update_case(case_id: str, mutate_fn):
             save_db(db)
             return case_copy
     raise ValueError("Case not found")
-
-
-def save_output(case_record: dict, tool_name: str, title_hint: str, content: str) -> str:
-    case_dir = CASE_OUTPUT_DIR / sanitize_filename(f"{case_record['mrn']}_{case_record['name']}")
-    case_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_hint = sanitize_filename(title_hint)
-    filename = f"{timestamp}_{tool_name}_{safe_hint}.txt"
-    path = case_dir / filename
-    path.write_text(content or "", encoding="utf-8")
-    return str(path)
 
 
 def ask_model(system_prompt: str, user_input: str) -> str:
@@ -434,8 +428,8 @@ def extract_relevant_admission_date(*texts: str) -> str:
     return matches[-1] if matches else "UNKNOWN DATE"
 
 
-def build_forced_diagnosis_sections(chief_complaint: str, admission_purpose: str, history_text: str, outpatient_notes: str, timeline_text: str, additional_history: str, extra_data: str) -> tuple[str, str, str, str]:
-    blocks = collect_latest_diagnosis_blocks(history_text, outpatient_notes, additional_history, extra_data)
+def build_forced_diagnosis_sections(chief_complaint: str, admission_purpose: str, history_text: str, outpatient_notes: str, emergency_notes: str, timeline_text: str, additional_history: str, extra_data: str) -> tuple[str, str, str, str]:
+    blocks = collect_latest_diagnosis_blocks(history_text, outpatient_notes, emergency_notes, additional_history, extra_data)
     if not blocks:
         return "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN DATE"
 
@@ -446,6 +440,7 @@ def build_forced_diagnosis_sections(chief_complaint: str, admission_purpose: str
         additional_history or "",
         extra_data or "",
         outpatient_notes or "",
+        emergency_notes or "",
     ])
 
     scored = [(block, block_activity_score(block, context_text)) for block in blocks]
@@ -479,7 +474,7 @@ def build_forced_diagnosis_sections(chief_complaint: str, admission_purpose: str
     active_text = "\n".join(active_blocks) if active_blocks else "UNKNOWN"
     underlying_text = "\n".join(underlying_blocks) if underlying_blocks else "UNKNOWN"
     plan_active_titles = build_plan_active_titles(active_text)
-    admission_date_text = extract_relevant_admission_date(timeline_text, additional_history, extra_data, outpatient_notes, history_text)
+    admission_date_text = extract_relevant_admission_date(timeline_text, additional_history, extra_data, emergency_notes, outpatient_notes, history_text)
     return active_text, underlying_text, plan_active_titles, admission_date_text
 
 
@@ -602,6 +597,7 @@ STRICT RULES:
 - Output should be easy for a PGY to use during bedside history taking
 - Do NOT write long paragraphs
 - Timeline must be based ONLY on provided information
+- Emergency department notes should be incorporated when provided
 - If exact date is unavailable, use approximate wording such as "previously", "recently", "on admission"
 - For the checklist, you MUST actively check whether the provided information already includes the following domains:
   past history, family history, surgical history, medication history, allergy history, smoking/alcohol/betel nut history, Chinese herbs or health supplements, TOCC if fever or suspected infection is mentioned
@@ -675,6 +671,13 @@ CRITICAL PRESENT ILLNESS WRITING RULES
 - More remote events can be summarized briefly.
 - Keep the chronology clear and natural.
 - Do not overload the diagnosis lines with timeline details; put those details into the narrative.
+- In the FINAL paragraph of Present illness, summarize the current admission reason and the MOST RECENT IMPORTANT objective findings for this admission:
+  • important labs
+  • important imaging
+  • important abnormal physical examination findings, if provided
+- Only include objective findings that are actually given in the input.
+- Prioritize the most recent and clinically important findings; do not list every minor value.
+- The final paragraph should therefore explain why this admission is happening now, what the recent key lab/image/PE results show, and then close with the required due-to sentence.
 - The ending sentence of Present illness MUST close with this structure:
   "Due to the reason of ... , the patient was admitted on X/X."
 - The reason in that sentence must be mainly based on Admission purpose and supported by the provided history.
@@ -708,6 +711,8 @@ FORMAT REQUIREMENTS
 - After the diagnosis lines, write Present illness as a chronological clinical story
 - Recent events should be more detailed; remote history can be brief
 - Treatment history in the narrative should use natural clinical prose, and may mention status post major procedures when relevant
+- In the LAST paragraph of Present illness, summarize the current admission purpose/reason and the most recent important lab, imaging, and abnormal PE findings if available
+- This last paragraph should focus on why the patient is admitted this time and what the recent workup shows
 - End the Present illness with: "Due to the reason of ... , the patient was admitted on X/X."
 - Match real admission style
 
@@ -918,11 +923,60 @@ During the hospital course, ...
 At the time of discharge, ...
 """
 
+
+HANDOFF_PROMPT = """
+You are a clinical assistant generating a concise handoff summary for an inpatient case.
+
+STRICT RULES:
+- Do NOT hallucinate
+- Only use provided information
+- Be clinically practical and concise
+- Use formal clinical English
+- Prioritize current inpatient issues
+- If procedure-related information is absent, write "None noted" for procedure summary
+- Do not invent vitals, labs, imaging, or events
+
+TASK:
+You will be given THREE input sections:
+1. Problem
+2. Assessment
+3. Plan
+
+Use them together to generate the following sections exactly:
+
+[One-liner]
+- One sentence summary including age/sex when available, major active disease(s), current status, and admission context if available
+- Mainly synthesize the most important Problem + Assessment
+
+[Active Issues]
+- Bullet points of current active problems needing management
+- Mainly based on Problem and supported by Assessment
+
+[Overnight Concerns]
+- Bullet points of what the covering team should watch overnight
+- Mainly infer from Assessment
+- Include possible complications, monitoring focus, red flags, pain/wound/bleeding/fever/respiratory/hemodynamic concerns if relevant
+
+[To-do List]
+- Bullet points of actionable pending tasks
+- Mainly based on Plan
+- Include follow-up labs, image review, consult follow-up, wound care, medication adjustments, discharge planning, etc. when supported
+
+[Post-op Note / Procedure Summary]
+- Short bullets summarizing important recent operation(s), bedside procedures, drains/wounds, major postoperative status, if procedure-related information is present in Problem / Assessment / Plan
+- Otherwise write "None noted"
+
+STYLE:
+- Keep each bullet short and practical
+- Focus on cross-cover usefulness
+- Output in clean structured format
+"""
+
 OR_PROMPT = """
 You are a surgical assistant helping a PGY prepare for upcoming operations.
 
 GOAL:
-Generate a practical OR briefing in MIXED Chinese-English style.
+Generate a practical OR briefing and PGY knowledge bank in MIXED Chinese-English style.
 
 STRICT RULES:
 - Do NOT hallucinate uncommon details
@@ -930,6 +984,8 @@ STRICT RULES:
 - Use guideline-based indications when possible
 - Be concise but clinically meaningful
 - Suitable for PGY level
+- Prefer practical points that are commonly asked during OR, ward rounds, and post-op discussions
+- If exact anatomy or complication details are not clearly procedure-specific, provide the most relevant commonly tested essentials only
 
 OUTPUT FORMAT:
 
@@ -982,6 +1038,30 @@ OUTPUT FORMAT:
 - safety checks
 - unclear info
 
+9. Common Pimp Questions（常見被問題庫）
+- 5–10 short high-yield pimp questions
+- Cover indication, anatomy, steps, complication, postoperative care
+- Format:
+    Q: ...
+    A: ...
+
+10. Anatomy Quick Review（解剖快整理）
+- Brief bullet review of the most relevant anatomy for this surgery
+- Include:
+    • key layers / spaces
+    • important vessels
+    • important nerves
+    • structures at risk
+- Keep it short and clinically testable
+
+11. Complication Quick Review（併發症快整理）
+- Short bullets of common and dangerous complications
+- Include:
+    • intra-op complications
+    • early post-op complications
+    • late complications if high-yield
+    • what to monitor or how to recognize them
+
 STYLE:
 - Mixed Chinese + English
 - Bullet points
@@ -1029,15 +1109,20 @@ def load_selected_case(case_id):
     weekly = case["weekly"]
     discharge = case["discharge"]
     orb = case["or_briefing"]
+    handoff = case.get("handoff", {"problem": "", "assessment": "", "plan": "", "output": ""})
+
+    auto_discharge_weekly = discharge["weekly"] or weekly["output"]
+    auto_or_history = orb["history"] or s2["history_text"] or s1["history_text"]
 
     return (
         case["id"],
         patient_summary_md(case),
-        s1["chief_complaint"], s1["admission_purpose"], s1["history_text"], s1.get("outpatient_notes", ""), s1["labs"], s1.get("timeline_output", ""), s1.get("checklist_output", s1.get("output", "")), s1["file_path"] or None,
-        s2["chief_complaint"], s2["admission_purpose"], s2["history_text"], s2.get("outpatient_notes", ""), s2.get("timeline_text", ""), s2["labs"], s2["additional_history"], s2["pe_findings"], s2["extra_data"], s2["output"], s2["file_path"] or None,
-        weekly["events"], weekly["previous_weekly"], weekly["output"], weekly["file_path"] or None,
-        discharge["weekly"], discharge["final_events"], discharge["output"], discharge["file_path"] or None,
-        orb["history"], orb["meds"], orb["surgery"], orb["extra"], orb["output"], orb["file_path"] or None,
+        s1["chief_complaint"], s1["admission_purpose"], s1["history_text"], s1.get("outpatient_notes", ""), s1.get("emergency_notes", ""), s1["labs"], s1.get("timeline_output", ""), s1.get("checklist_output", s1.get("output", "")),
+        s2["chief_complaint"], s2["admission_purpose"], s2["history_text"], s2.get("outpatient_notes", ""), s2.get("emergency_notes", ""), s2.get("timeline_text", ""), s2["labs"], s2["additional_history"], s2["pe_findings"], s2["extra_data"], s2["output"],
+        weekly["events"], weekly["previous_weekly"], weekly["output"],
+        auto_discharge_weekly, discharge["final_events"], discharge["output"],
+        auto_or_history, orb["meds"], orb["surgery"], orb["extra"], orb["output"],
+        handoff.get("problem", ""), handoff.get("assessment", ""), handoff.get("plan", ""), handoff.get("output", ""),
         f"已載入 case：{case['mrn']} / {case['name']}",
     )
 
@@ -1078,6 +1163,99 @@ def restore_case(case_id, status_filter, keyword):
     )
 
 
+def delete_case(case_id, status_filter, keyword):
+    case = require_case(case_id)
+    db = load_db()
+    db["cases"] = [c for c in db.get("cases", []) if c.get("id") != case_id]
+    save_db(db)
+
+
+    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(status_filter, keyword, None)
+    return (
+        sidebar_dropdown,
+        sidebar_md,
+        selected_case_id,
+        "### No case selected\n請先從左側病人列表選擇一個 case。",
+        *empty_stage1(),
+        *empty_stage2(),
+        *empty_weekly(),
+        *empty_discharge(),
+        *empty_or(),
+        *empty_handoff(),
+        f"已移除 case：{case['mrn']} / {case['name']}",
+    )
+
+
+
+def save_workspace(
+    case_id,
+    chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, checklist1,
+    chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+    weekly_events, weekly_prev, weekly_out,
+    discharge_weekly, discharge_events, discharge_out,
+    or_history, or_meds, or_surgery, or_extra, or_out,
+    handoff_problem, handoff_assessment, handoff_plan, handoff_out,
+):
+    case = require_case(case_id)
+
+    updated = update_case(
+        case_id,
+        lambda c: (
+            c["admission"]["stage1"].update({
+                "chief_complaint": chief1,
+                "admission_purpose": purpose1,
+                "history_text": history1,
+                "outpatient_notes": outpatient1,
+                "emergency_notes": emergency1,
+                "labs": labs1,
+                "timeline_output": timeline1,
+                "checklist_output": checklist1,
+                "output": (
+                    "[Current History Timeline 目前病史時間軸整理]\n" + (timeline1 or "") + "\n\n"
+                    "[Admission Checklist 入院前檢查清單]\n" + (checklist1 or "")
+                ).strip(),
+            }),
+            c["admission"]["stage2"].update({
+                "chief_complaint": chief2,
+                "admission_purpose": purpose2,
+                "history_text": history2,
+                "outpatient_notes": outpatient2,
+                "emergency_notes": emergency2,
+                "timeline_text": timeline2,
+                "labs": labs2,
+                "additional_history": add_hist,
+                "pe_findings": pe2,
+                "extra_data": extra2,
+                "output": output2,
+            }),
+            c["weekly"].update({
+                "events": weekly_events,
+                "previous_weekly": weekly_prev,
+                "output": weekly_out,
+            }),
+            c["discharge"].update({
+                "weekly": discharge_weekly,
+                "final_events": discharge_events,
+                "output": discharge_out,
+            }),
+            c["or_briefing"].update({
+                "history": or_history,
+                "meds": or_meds,
+                "surgery": or_surgery,
+                "extra": or_extra,
+                "output": or_out,
+            }),
+            c.setdefault("handoff", {}).update({
+                "problem": handoff_problem,
+                "assessment": handoff_assessment,
+                "plan": handoff_plan,
+                "output": handoff_out,
+            }),
+        ),
+    )
+
+    return patient_summary_md(updated), f"Workspace saved: {updated['mrn']} / {updated['name']}"
+
 def refresh_sidebar_ui(status_filter, keyword, selected_case_id):
     return sync_sidebar(status_filter, keyword, selected_case_id)
 
@@ -1085,7 +1263,7 @@ def refresh_sidebar_ui(status_filter, keyword, selected_case_id):
 # =========================================================
 # Core workflow functions
 # =========================================================
-def admission_stage1(case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, labs):
+def admission_stage1(case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, labs):
     case = require_case(case_id)
     user_input = f"""
 Chief complaint: {chief_complaint}
@@ -1098,6 +1276,9 @@ Known history:
 Outpatient notes / OPD record:
 {outpatient_notes}
 
+Emergency department notes / ER record:
+{emergency_notes}
+
 Labs / imaging:
 {labs}
 """
@@ -1107,7 +1288,6 @@ Labs / imaging:
         "[Current History Timeline 目前病史時間軸整理]\n" + (timeline_output or "") + "\n\n"
         "[Admission Checklist 入院前檢查清單]\n" + (checklist_output or "")
     ).strip()
-    path = save_output(case, "admission_stage1", chief_complaint, combined_output)
 
     updated = update_case(
         case_id,
@@ -1117,18 +1297,18 @@ Labs / imaging:
                 "admission_purpose": admission_purpose,
                 "history_text": history_text,
                 "outpatient_notes": outpatient_notes,
+                "emergency_notes": emergency_notes,
                 "labs": labs,
                 "timeline_output": timeline_output,
                 "checklist_output": checklist_output,
                 "output": combined_output,
-                "file_path": path,
             }
         ),
     )
-    return timeline_output, checklist_output, path, patient_summary_md(updated)
+    return timeline_output, checklist_output, patient_summary_md(updated)
 
 
-def admission_stage2(case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, timeline_text, labs, additional_history, pe_findings, extra_data):
+def admission_stage2(case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, timeline_text, labs, additional_history, pe_findings, extra_data):
     case = require_case(case_id)
 
     forced_active_dx, forced_underlying_dx, plan_active_dx, forced_admission_date = build_forced_diagnosis_sections(
@@ -1136,6 +1316,7 @@ def admission_stage2(case_id, chief_complaint, admission_purpose, history_text, 
         admission_purpose,
         history_text,
         outpatient_notes,
+        emergency_notes,
         timeline_text,
         additional_history,
         extra_data,
@@ -1151,6 +1332,9 @@ Known history:
 
 Outpatient notes / OPD record:
 {outpatient_notes}
+
+Emergency department notes / ER record:
+{emergency_notes}
 
 Current history timeline:
 {timeline_text}
@@ -1180,7 +1364,6 @@ Additional data:
 {forced_admission_date if forced_admission_date else "UNKNOWN DATE"}
 """
     result = ask_model(STAGE2_PROMPT, user_input)
-    path = save_output(case, "admission_stage2", chief_complaint, result)
 
     updated = update_case(
         case_id,
@@ -1190,17 +1373,47 @@ Additional data:
                 "admission_purpose": admission_purpose,
                 "history_text": history_text,
                 "outpatient_notes": outpatient_notes,
+                "emergency_notes": emergency_notes,
                 "timeline_text": timeline_text,
                 "labs": labs,
                 "additional_history": additional_history,
                 "pe_findings": pe_findings,
                 "extra_data": extra_data,
                 "output": result,
-                "file_path": path,
             }
         ),
     )
-    return result, path, patient_summary_md(updated)
+    auto_or_history = history_text or updated["admission"]["stage1"].get("history_text", "")
+    return result, patient_summary_md(updated), auto_or_history
+
+
+
+def handoff_summary(case_id, problem, assessment, plan):
+    case = require_case(case_id)
+    user_input = f"""
+Problem:
+{problem}
+
+Assessment:
+{assessment}
+
+Plan:
+{plan}
+"""
+    result = ask_model(HANDOFF_PROMPT, user_input)
+
+    updated = update_case(
+        case_id,
+        lambda c: c.setdefault("handoff", {}).update(
+            {
+                "problem": problem,
+                "assessment": assessment,
+                "plan": plan,
+                "output": result,
+            }
+        ),
+    )
+    return result, patient_summary_md(updated)
 
 
 def weekly_summary(case_id, events, previous_weekly):
@@ -1213,7 +1426,6 @@ Previous weekly summary (if any):
 {previous_weekly}
 """
     result = ask_model(WEEKLY_PROMPT, user_input)
-    path = save_output(case, "weekly_summary", "weekly", result)
 
     updated = update_case(
         case_id,
@@ -1222,11 +1434,10 @@ Previous weekly summary (if any):
                 "events": events,
                 "previous_weekly": previous_weekly,
                 "output": result,
-                "file_path": path,
             }
         ),
     )
-    return result, path, patient_summary_md(updated)
+    return result, patient_summary_md(updated), result
 
 
 def discharge_note(case_id, weekly, final_events):
@@ -1239,7 +1450,6 @@ Final week events and timeline:
 {final_events}
 """
     result = ask_model(DISCHARGE_PROMPT, user_input)
-    path = save_output(case, "discharge_note", "discharge", result)
 
     updated = update_case(
         case_id,
@@ -1248,11 +1458,10 @@ Final week events and timeline:
                 "weekly": weekly,
                 "final_events": final_events,
                 "output": result,
-                "file_path": path,
             }
         ),
     )
-    return result, path, patient_summary_md(updated)
+    return result, patient_summary_md(updated)
 
 
 def or_briefing(case_id, history, meds, surgery, extra):
@@ -1271,7 +1480,6 @@ Additional info:
 {extra}
 """
     result = ask_model(OR_PROMPT, user_input)
-    path = save_output(case, "or_briefing", surgery, result)
 
     updated = update_case(
         case_id,
@@ -1282,18 +1490,17 @@ Additional info:
                 "surgery": surgery,
                 "extra": extra,
                 "output": result,
-                "file_path": path,
             }
         ),
     )
-    return result, path, patient_summary_md(updated)
+    return result, patient_summary_md(updated)
 
 
 # =========================================================
 # Cross-fill helpers
 # =========================================================
-def copy_stage1_to_stage2(chief, purpose, history, outpatient_notes, timeline_text, labs):
-    return chief, purpose, history, outpatient_notes, timeline_text, labs
+def copy_stage1_to_stage2(chief, purpose, history, outpatient_notes, emergency_notes, timeline_text, labs):
+    return chief, purpose, history, outpatient_notes, emergency_notes, timeline_text, labs
 
 
 def copy_weekly_to_discharge(weekly_output):
@@ -1302,6 +1509,14 @@ def copy_weekly_to_discharge(weekly_output):
 
 def copy_history_to_or(history_text):
     return history_text
+
+
+def autofill_discharge_from_weekly(weekly_output, current_discharge_weekly):
+    return current_discharge_weekly or weekly_output
+
+
+def autofill_or_history(stage2_history_text, stage1_history_text, current_or_history):
+    return current_or_history or stage2_history_text or stage1_history_text
 
 
 # =========================================================
@@ -1344,6 +1559,10 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
             with gr.Row():
                 discharge_case_btn = gr.Button("Move to Discharged Archive")
                 restore_case_btn = gr.Button("Restore to Active")
+                delete_case_btn = gr.Button("Delete Case", variant="stop")
+            with gr.Row():
+                save_workspace_btn = gr.Button("💾 Save Workspace")
+                reload_workspace_btn = gr.Button("🔄 Reload Workspace")
             case_status_message = gr.Markdown("")
 
             with gr.Tabs():
@@ -1354,6 +1573,7 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
                         purpose1 = gr.Textbox(label="Admission Purpose")
                     history1 = gr.Textbox(label="Known History / Previous Notes (中英皆可)", lines=10)
                     outpatient1 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
+                    emergency1 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
                     labs1 = gr.Textbox(label="Labs / Imaging (brief)", lines=5)
 
                     with gr.Row():
@@ -1363,7 +1583,6 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
                     with gr.Row():
                         timeline1 = gr.Textbox(label="Current History Timeline", lines=18)
                         output1 = gr.Textbox(label="Admission Checklist", lines=18)
-                    file1 = gr.File(label="Download Stage 1 Output")
 
                     gr.Markdown("## Stage 2: Final Admission Note")
                     with gr.Row():
@@ -1371,6 +1590,7 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
                         purpose2 = gr.Textbox(label="Admission Purpose")
                     history2 = gr.Textbox(label="Known History / Previous Notes", lines=10)
                     outpatient2 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
+                    emergency2 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
                     timeline2 = gr.Textbox(label="Current History Timeline", lines=6)
                     labs2 = gr.Textbox(label="Labs / Imaging", lines=5)
                     add_hist = gr.Textbox(label="Additional History Obtained", lines=5)
@@ -1383,7 +1603,6 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
                         btn2_clear = gr.Button("Clear")
 
                     output2 = gr.Textbox(label="Final Admission Note", lines=30)
-                    file2 = gr.File(label="Download Final Admission Note")
 
                 with gr.Tab("Weekly Summary"):
                     weekly_events = gr.Textbox(label="This week's events & timeline", lines=15)
@@ -1394,7 +1613,6 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
                         weekly_clear = gr.Button("Clear")
 
                     weekly_out = gr.Textbox(label="Weekly Summary", lines=25)
-                    weekly_file = gr.File(label="Download Weekly Summary")
 
                 with gr.Tab("Discharge Note"):
                     discharge_weekly = gr.Textbox(label="All weekly summaries (optional)", lines=15)
@@ -1402,11 +1620,23 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
 
                     with gr.Row():
                         discharge_copy = gr.Button("Copy Weekly Output Here")
+                        discharge_autofill = gr.Button("Auto-fill from Weekly")
                         discharge_btn = gr.Button("Generate Course and Treatment")
                         discharge_clear = gr.Button("Clear")
 
                     discharge_out = gr.Textbox(label="Course and Treatment", lines=20)
-                    discharge_file = gr.File(label="Download Course and Treatment")
+
+
+                with gr.Tab("交班摘要"):
+                    handoff_problem = gr.Textbox(label="Problem", lines=6)
+                    handoff_assessment = gr.Textbox(label="Assessment", lines=6)
+                    handoff_plan = gr.Textbox(label="Plan", lines=6)
+
+                    with gr.Row():
+                        handoff_btn = gr.Button("Generate Handoff Summary")
+                        handoff_clear = gr.Button("Clear")
+
+                    handoff_out = gr.Textbox(label="交班摘要 Handoff Summary", lines=24)
 
                 with gr.Tab("OR Briefing"):
                     or_history = gr.Textbox(label="Brief History（病史）", lines=6)
@@ -1416,11 +1646,11 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
 
                     with gr.Row():
                         or_copy_history = gr.Button("Copy Admission History Here")
+                        or_autofill = gr.Button("Auto-fill Admission History")
                         or_btn = gr.Button("Generate OR Briefing")
                         or_clear = gr.Button("Clear")
 
                     or_out = gr.Textbox(label="OR Briefing", lines=30)
-                    or_file = gr.File(label="Download OR Briefing")
 
     # Sidebar refresh / filter
     status_filter.change(
@@ -1452,11 +1682,12 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
         inputs=[case_selector],
         outputs=[
             selected_case_id, case_summary,
-            chief1, purpose1, history1, outpatient1, labs1, timeline1, output1, file1,
-            chief2, purpose2, history2, outpatient2, timeline2, labs2, add_hist, pe2, extra2, output2, file2,
-            weekly_events, weekly_prev, weekly_out, weekly_file,
-            discharge_weekly, discharge_events, discharge_out, discharge_file,
-            or_history, or_meds, or_surgery, or_extra, or_out, or_file,
+            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            weekly_events, weekly_prev, weekly_out,
+            discharge_weekly, discharge_events, discharge_out,
+            or_history, or_meds, or_surgery, or_extra, or_out,
+            handoff_problem, handoff_assessment, handoff_plan, handoff_out,
             case_status_message,
         ],
     )
@@ -1465,11 +1696,41 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
         inputs=[case_selector],
         outputs=[
             selected_case_id, case_summary,
-            chief1, purpose1, history1, outpatient1, labs1, timeline1, output1, file1,
-            chief2, purpose2, history2, outpatient2, timeline2, labs2, add_hist, pe2, extra2, output2, file2,
-            weekly_events, weekly_prev, weekly_out, weekly_file,
-            discharge_weekly, discharge_events, discharge_out, discharge_file,
-            or_history, or_meds, or_surgery, or_extra, or_out, or_file,
+            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            weekly_events, weekly_prev, weekly_out,
+            discharge_weekly, discharge_events, discharge_out,
+            or_history, or_meds, or_surgery, or_extra, or_out,
+            handoff_problem, handoff_assessment, handoff_plan, handoff_out,
+            case_status_message,
+        ],
+    )
+
+    # Workspace save / reload
+    save_workspace_btn.click(
+        save_workspace,
+        inputs=[
+            selected_case_id,
+            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            weekly_events, weekly_prev, weekly_out,
+            discharge_weekly, discharge_events, discharge_out,
+            or_history, or_meds, or_surgery, or_extra, or_out,
+            handoff_problem, handoff_assessment, handoff_plan, handoff_out,
+        ],
+        outputs=[case_summary, case_status_message],
+    )
+    reload_workspace_btn.click(
+        load_selected_case,
+        inputs=[selected_case_id],
+        outputs=[
+            selected_case_id, case_summary,
+            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            weekly_events, weekly_prev, weekly_out,
+            discharge_weekly, discharge_events, discharge_out,
+            or_history, or_meds, or_surgery, or_extra, or_out,
+            handoff_problem, handoff_assessment, handoff_plan, handoff_out,
             case_status_message,
         ],
     )
@@ -1485,41 +1746,55 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
         inputs=[selected_case_id, status_filter, case_search],
         outputs=[case_selector, case_list_preview, selected_case_id, case_summary, case_status_message],
     )
+    delete_case_btn.click(
+        delete_case,
+        inputs=[selected_case_id, status_filter, case_search],
+        outputs=[
+            case_selector, case_list_preview, selected_case_id, case_summary,
+            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            weekly_events, weekly_prev, weekly_out,
+            discharge_weekly, discharge_events, discharge_out,
+            or_history, or_meds, or_surgery, or_extra, or_out,
+            handoff_problem, handoff_assessment, handoff_plan, handoff_out,
+            case_status_message,
+        ],
+    )
 
     # Workflow actions
     btn1.click(
         admission_stage1,
-        inputs=[selected_case_id, chief1, purpose1, history1, outpatient1, labs1],
-        outputs=[timeline1, output1, file1, case_summary],
+        inputs=[selected_case_id, chief1, purpose1, history1, outpatient1, emergency1, labs1],
+        outputs=[timeline1, output1, case_summary],
     )
     btn1_clear.click(
         lambda: empty_stage1(),
-        outputs=[chief1, purpose1, history1, outpatient1, labs1, timeline1, output1, file1],
+        outputs=[chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1],
     )
 
     btn_copy_to_stage2.click(
         copy_stage1_to_stage2,
-        inputs=[chief1, purpose1, history1, outpatient1, timeline1, labs1],
-        outputs=[chief2, purpose2, history2, outpatient2, timeline2, labs2],
+        inputs=[chief1, purpose1, history1, outpatient1, emergency1, timeline1, labs1],
+        outputs=[chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2],
     )
     btn2.click(
         admission_stage2,
-        inputs=[selected_case_id, chief2, purpose2, history2, outpatient2, timeline2, labs2, add_hist, pe2, extra2],
-        outputs=[output2, file2, case_summary],
+        inputs=[selected_case_id, chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2],
+        outputs=[output2, case_summary, or_history],
     )
     btn2_clear.click(
         lambda: empty_stage2(),
-        outputs=[chief2, purpose2, history2, outpatient2, timeline2, labs2, add_hist, pe2, extra2, output2, file2],
+        outputs=[chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2],
     )
 
     weekly_btn.click(
         weekly_summary,
         inputs=[selected_case_id, weekly_events, weekly_prev],
-        outputs=[weekly_out, weekly_file, case_summary],
+        outputs=[weekly_out, case_summary, discharge_weekly],
     )
     weekly_clear.click(
         lambda: empty_weekly(),
-        outputs=[weekly_events, weekly_prev, weekly_out, weekly_file],
+        outputs=[weekly_events, weekly_prev, weekly_out],
     )
 
     discharge_copy.click(
@@ -1527,14 +1802,30 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
         inputs=[weekly_out],
         outputs=[discharge_weekly],
     )
+    discharge_autofill.click(
+        autofill_discharge_from_weekly,
+        inputs=[weekly_out, discharge_weekly],
+        outputs=[discharge_weekly],
+    )
     discharge_btn.click(
         discharge_note,
         inputs=[selected_case_id, discharge_weekly, discharge_events],
-        outputs=[discharge_out, discharge_file, case_summary],
+        outputs=[discharge_out, case_summary],
     )
     discharge_clear.click(
         lambda: empty_discharge(),
-        outputs=[discharge_weekly, discharge_events, discharge_out, discharge_file],
+        outputs=[discharge_weekly, discharge_events, discharge_out],
+    )
+
+
+    handoff_btn.click(
+        handoff_summary,
+        inputs=[selected_case_id, handoff_problem, handoff_assessment, handoff_plan],
+        outputs=[handoff_out, case_summary],
+    )
+    handoff_clear.click(
+        lambda: empty_handoff(),
+        outputs=[handoff_problem, handoff_assessment, handoff_plan, handoff_out],
     )
 
     or_copy_history.click(
@@ -1542,21 +1833,26 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
         inputs=[history2],
         outputs=[or_history],
     )
+    or_autofill.click(
+        autofill_or_history,
+        inputs=[history2, history1, or_history],
+        outputs=[or_history],
+    )
     or_btn.click(
         or_briefing,
         inputs=[selected_case_id, or_history, or_meds, or_surgery, or_extra],
-        outputs=[or_out, or_file, case_summary],
+        outputs=[or_out, case_summary],
     )
     or_clear.click(
         lambda: empty_or(),
-        outputs=[or_history, or_meds, or_surgery, or_extra, or_out, or_file],
+        outputs=[or_history, or_meds, or_surgery, or_extra, or_out],
     )
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    username = os.environ.get("CLINICAL_AI_USERNAME", "admin")
-    password = os.environ.get("CLINICAL_AI_PASSWORD", "change-this-password")
+    username = os.environ.get("CLINICAL_AI_USERNAME", "1")
+    password = os.environ.get("CLINICAL_AI_PASSWORD", "1")
 
     print("DEBUG OPENAI exists:", bool(os.environ.get("OPENAI_API_KEY")))
     print("DEBUG APP_DATA_DIR:", APP_DATA_DIR)
@@ -1566,5 +1862,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=port,
         auth=(username, password),
-        allowed_paths=[str(APP_DATA_DIR), str(CASE_OUTPUT_DIR)],
+        allowed_paths=[str(APP_DATA_DIR)],
     )
