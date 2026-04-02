@@ -1604,6 +1604,17 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
 
                     output2 = gr.Textbox(label="Final Admission Note", lines=30)
 
+                with gr.Tab("交班摘要"):
+                    handoff_problem = gr.Textbox(label="Problem", lines=6)
+                    handoff_assessment = gr.Textbox(label="Assessment", lines=6)
+                    handoff_plan = gr.Textbox(label="Plan", lines=6)
+
+                    with gr.Row():
+                        handoff_btn = gr.Button("Generate Handoff Summary")
+                        handoff_clear = gr.Button("Clear")
+
+                    handoff_out = gr.Textbox(label="交班摘要 Handoff Summary", lines=24)
+
                 with gr.Tab("Weekly Summary"):
                     weekly_events = gr.Textbox(label="This week's events & timeline", lines=15)
                     weekly_prev = gr.Textbox(label="Previous weekly summary (optional)", lines=10)
@@ -1626,17 +1637,6 @@ with gr.Blocks(title="Clinical AI Workspace - Dashboard", theme=gr.themes.Soft()
 
                     discharge_out = gr.Textbox(label="Course and Treatment", lines=20)
 
-
-                with gr.Tab("交班摘要"):
-                    handoff_problem = gr.Textbox(label="Problem", lines=6)
-                    handoff_assessment = gr.Textbox(label="Assessment", lines=6)
-                    handoff_plan = gr.Textbox(label="Plan", lines=6)
-
-                    with gr.Row():
-                        handoff_btn = gr.Button("Generate Handoff Summary")
-                        handoff_clear = gr.Button("Clear")
-
-                    handoff_out = gr.Textbox(label="交班摘要 Handoff Summary", lines=24)
 
                 with gr.Tab("OR Briefing"):
                     or_history = gr.Textbox(label="Brief History（病史）", lines=6)
