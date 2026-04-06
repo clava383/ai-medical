@@ -20,6 +20,7 @@ load_dotenv()
 # =========================================================
 APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "/tmp/ai-medical-data"))
 USERS_DB_PATH = APP_DATA_DIR / "users.json"
+SESSIONS_DB_PATH = APP_DATA_DIR / "sessions.json"
 USER_DATA_DIR = APP_DATA_DIR / "users"
 
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -27,6 +28,8 @@ USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 if not USERS_DB_PATH.exists():
     USERS_DB_PATH.write_text(json.dumps({"users": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+if not SESSIONS_DB_PATH.exists():
+    SESSIONS_DB_PATH.write_text(json.dumps({"sessions": []}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # =========================================================
@@ -46,6 +49,42 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def parse_timeline_date(date_str: str):
+    date_str = (date_str or "").strip()
+    if not date_str:
+        return None
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%m/%d"):
+        try:
+            parsed = datetime.strptime(date_str, fmt)
+            if fmt == "%m/%d":
+                parsed = parsed.replace(year=datetime.now().year)
+            return parsed
+        except ValueError:
+            continue
+    return None
+
+
+def sort_timeline_text(timeline_text: str) -> str:
+    lines = [ln.rstrip() for ln in (timeline_text or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+
+    dated_items = []
+    undated_items = []
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        match = re.search(r"(20\d{2}[/-]\d{1,2}[/-]\d{1,2}|\b\d{1,2}/\d{1,2}\b)", stripped)
+        parsed = parse_timeline_date(match.group(1)) if match else None
+        if parsed is None:
+            undated_items.append((idx, stripped))
+        else:
+            dated_items.append((parsed, idx, stripped))
+
+    dated_items.sort(key=lambda x: (x[0], x[1]))
+    ordered = [item[2] for item in dated_items] + [item[1] for item in undated_items]
+    return "\n".join(ordered)
+
+
 def sanitize_filename(text: str, max_len: int = 40) -> str:
     if not text:
         return "untitled"
@@ -63,7 +102,7 @@ def empty_stage1():
 
 
 def empty_stage2():
-    return "", "", "", "", "", "", "", "", "", "", ""
+    return "", "", "", "", "", "", "", "", "", "", "", ""
 
 
 def empty_weekly():
@@ -116,6 +155,7 @@ def default_case_record(mrn: str, name: str, age: str, sex: str) -> dict:
                 "additional_history": "",
                 "pe_findings": "",
                 "extra_data": "",
+                "diagnosis": "",
                 "output": "",
             },
         },
@@ -172,6 +212,58 @@ def load_users_db() -> dict:
 
 def save_users_db(db: dict) -> None:
     USERS_DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_sessions_db() -> dict:
+    try:
+        return json.loads(SESSIONS_DB_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"sessions": []}
+
+
+def save_sessions_db(db: dict) -> None:
+    SESSIONS_DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def create_session(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    db = load_sessions_db()
+    db["sessions"] = [s for s in db.get("sessions", []) if s.get("username") != username]
+    db.setdefault("sessions", []).append(
+        {
+            "username": username,
+            "token": token,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+    )
+    save_sessions_db(db)
+    return token
+
+
+def validate_session(username: str, token: str) -> bool:
+    username = (username or "").strip()
+    token = (token or "").strip()
+    if not username or not token:
+        return False
+    db = load_sessions_db()
+    for session in db.get("sessions", []):
+        if session.get("username") == username and secrets.compare_digest(session.get("token", ""), token):
+            session["updated_at"] = now_iso()
+            save_sessions_db(db)
+            return True
+    return False
+
+
+def delete_session(username: str, token: str = "") -> None:
+    username = (username or "").strip()
+    token = (token or "").strip()
+    db = load_sessions_db()
+    db["sessions"] = [
+        s for s in db.get("sessions", [])
+        if not (s.get("username") == username and (not token or s.get("token") == token))
+    ]
+    save_sessions_db(db)
 
 
 def hash_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
@@ -633,6 +725,46 @@ def remove_duplicate_diagnosis_blocks(active_blocks: list[str], underlying_block
     return filtered_active, filtered_underlying
 
 
+def parse_manual_diagnosis_text(diagnosis_text: str) -> tuple[str, str, str]:
+    lines = [ln.rstrip() for ln in (diagnosis_text or "").splitlines() if ln.strip()]
+    if not lines:
+        return "", "", ""
+
+    active_lines: list[str] = []
+    underlying_lines: list[str] = []
+    current = "active"
+
+    for line in lines:
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if stripped.startswith("[") and "active" in lowered:
+            current = "active"
+            continue
+        if stripped.startswith("[") and ("underlying" in lowered or "past" in lowered):
+            current = "underlying"
+            continue
+
+        if stripped.startswith("#."):
+            normalized = f"#. {stripped[2:].strip()}"
+        elif stripped.startswith("#"):
+            normalized = f"#. {stripped.lstrip('#').strip()}"
+        else:
+            normalized = f"#. {stripped}"
+
+        if current == "underlying":
+            underlying_lines.append(normalized)
+        else:
+            active_lines.append(normalized)
+
+    if not active_lines and underlying_lines:
+        active_lines, underlying_lines = underlying_lines, []
+
+    active_text = "\n".join(dict.fromkeys(active_lines)) if active_lines else "UNKNOWN"
+    underlying_text = "\n".join(dict.fromkeys(underlying_lines)) if underlying_lines else "UNKNOWN"
+    plan_text = build_plan_active_titles(active_text) if active_text != "UNKNOWN" else "UNKNOWN"
+    return active_text, underlying_text, plan_text
+
+
 def extract_plan_title_from_dx_line(line: str) -> str:
     stripped = (line or "").strip()
     if not stripped:
@@ -676,10 +808,16 @@ def extract_relevant_admission_date(*texts: str) -> str:
     return matches[-1] if matches else "UNKNOWN DATE"
 
 
-def build_forced_diagnosis_sections(chief_complaint: str, admission_purpose: str, history_text: str, outpatient_notes: str, emergency_notes: str, timeline_text: str, additional_history: str, extra_data: str) -> tuple[str, str, str, str]:
+def build_forced_diagnosis_sections(chief_complaint: str, admission_purpose: str, history_text: str, outpatient_notes: str, emergency_notes: str, timeline_text: str, additional_history: str, extra_data: str, manual_diagnosis_text: str = "") -> tuple[str, str, str, str]:
+    admission_date_text = extract_relevant_admission_date(timeline_text, additional_history, extra_data, emergency_notes, outpatient_notes, history_text)
+
+    if (manual_diagnosis_text or "").strip():
+        manual_active_dx, manual_underlying_dx, manual_plan_dx = parse_manual_diagnosis_text(manual_diagnosis_text)
+        return manual_active_dx or "UNKNOWN", manual_underlying_dx or "UNKNOWN", manual_plan_dx or "UNKNOWN", admission_date_text
+
     blocks = collect_latest_diagnosis_blocks(history_text, outpatient_notes, emergency_notes, additional_history, extra_data)
     if not blocks:
-        return "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN DATE"
+        return "UNKNOWN", "UNKNOWN", "UNKNOWN", admission_date_text
 
     context_text = "\n".join([
         chief_complaint or "",
@@ -1400,7 +1538,7 @@ def load_selected_case(username, case_id):
         case["id"],
         patient_summary_md(case),
         s1["chief_complaint"], s1["admission_purpose"], s1["history_text"], s1.get("outpatient_notes", ""), s1.get("emergency_notes", ""), s1["labs"], s1.get("timeline_output", ""), s1.get("checklist_output", s1.get("output", "")),
-        s2["chief_complaint"], s2["admission_purpose"], s2["history_text"], s2.get("outpatient_notes", ""), s2.get("emergency_notes", ""), s2.get("timeline_text", ""), s2["labs"], s2["additional_history"], s2["pe_findings"], s2["extra_data"], s2["output"],
+        s2["chief_complaint"], s2["admission_purpose"], s2["history_text"], s2.get("outpatient_notes", ""), s2.get("emergency_notes", ""), s2.get("timeline_text", ""), s2["labs"], s2["additional_history"], s2["pe_findings"], s2["extra_data"], s2.get("diagnosis", ""), s2["output"],
         weekly["events"], weekly["previous_weekly"], weekly["output"],
         auto_discharge_weekly, discharge["final_events"], discharge["output"],
         auto_or_history, orb["meds"], orb["surgery"], orb["extra"], orb["output"],
@@ -1474,7 +1612,7 @@ def save_workspace(
     username,
     case_id,
     chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, checklist1,
-    chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+    chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
     weekly_events, weekly_prev, weekly_out,
     discharge_weekly, discharge_events, discharge_out,
     or_history, or_meds, or_surgery, or_extra, or_out,
@@ -1493,10 +1631,10 @@ def save_workspace(
                 "outpatient_notes": outpatient1,
                 "emergency_notes": emergency1,
                 "labs": labs1,
-                "timeline_output": timeline1,
+                "timeline_output": sort_timeline_text(timeline1),
                 "checklist_output": checklist1,
                 "output": (
-                    "[Current History Timeline 目前病史時間軸整理]\n" + (timeline1 or "") + "\n\n"
+                    "[Current History Timeline 目前病史時間軸整理]\n" + (sort_timeline_text(timeline1) or "") + "\n\n"
                     "[Admission Checklist 入院前檢查清單]\n" + (checklist1 or "")
                 ).strip(),
             }),
@@ -1506,11 +1644,12 @@ def save_workspace(
                 "history_text": history2,
                 "outpatient_notes": outpatient2,
                 "emergency_notes": emergency2,
-                "timeline_text": timeline2,
+                "timeline_text": sort_timeline_text(timeline2),
                 "labs": labs2,
                 "additional_history": add_hist,
                 "pe_findings": pe2,
                 "extra_data": extra2,
+                "diagnosis": diagnosis2,
                 "output": output2,
             }),
             c["weekly"].update({
@@ -1569,6 +1708,7 @@ Labs / imaging:
 """
     result = ask_model(STAGE1_PROMPT, user_input)
     timeline_output, checklist_output = split_stage1_output(result)
+    timeline_output = sort_timeline_text(timeline_output)
     combined_output = (
         "[Current History Timeline 目前病史時間軸整理]\n" + (timeline_output or "") + "\n\n"
         "[Admission Checklist 入院前檢查清單]\n" + (checklist_output or "")
@@ -1594,8 +1734,10 @@ Labs / imaging:
     return timeline_output, checklist_output, patient_summary_md(updated)
 
 
-def admission_stage2(username, case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, timeline_text, labs, additional_history, pe_findings, extra_data):
+def admission_stage2(username, case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, timeline_text, labs, additional_history, pe_findings, extra_data, diagnosis_text):
     case = require_case(username, case_id)
+
+    timeline_text = sort_timeline_text(timeline_text)
 
     forced_active_dx, forced_underlying_dx, plan_active_dx, forced_admission_date = build_forced_diagnosis_sections(
         chief_complaint,
@@ -1606,6 +1748,7 @@ def admission_stage2(username, case_id, chief_complaint, admission_purpose, hist
         timeline_text,
         additional_history,
         extra_data,
+        diagnosis_text,
     )
 
     user_input = f"""
@@ -1637,6 +1780,9 @@ Physical examination findings:
 Additional data:
 {extra_data}
 
+Manual diagnosis seed / editable diagnosis:
+{diagnosis_text}
+
 [FORCED ACTIVE DIAGNOSES]
 {forced_active_dx if forced_active_dx else "UNKNOWN"}
 
@@ -1666,6 +1812,7 @@ Additional data:
                 "additional_history": additional_history,
                 "pe_findings": pe_findings,
                 "extra_data": extra_data,
+                "diagnosis": diagnosis_text,
                 "output": result,
             }
         ),
@@ -1815,12 +1962,12 @@ def autofill_or_history(stage2_history_text, stage1_history_text, current_or_his
 # =========================================================
 # Session / UI helpers
 # =========================================================
-def login_user(username: str, password: str):
+def build_login_response(username: str, login_message: str, browser_payload: dict | None = None):
     username = (username or "").strip()
-    password = (password or "").strip()
-    ok = authenticate_admin(username, password) or authenticate_user(username, password)
-    if not ok:
+    if not username:
+        browser_payload = browser_payload or {"username": "", "session_token": ""}
         return (
+            browser_payload,
             "",
             current_user_md(""),
             gr.update(visible=True),
@@ -1828,8 +1975,8 @@ def login_user(username: str, password: str):
             gr.update(choices=[], value=None),
             "### Cases\n\n_請先登入._",
             None,
-            "登入失敗，請確認 username / password。",
-            username,
+            login_message,
+            "",
             "",
             gr.update(visible=False),
             gr.update(choices=[], value=None),
@@ -1840,10 +1987,13 @@ def login_user(username: str, password: str):
             gr.update(choices=[], value=None),
             "### Case Preview\n\n_尚未選擇 case。_",
         )
+
     sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, "Active", "", None)
     admin_visible = is_admin_user(username)
     admin_choices = admin_user_choices() if admin_visible else []
+    browser_payload = browser_payload or {"username": username, "session_token": ""}
     return (
+        browser_payload,
         username,
         current_user_md(username),
         gr.update(visible=False),
@@ -1851,7 +2001,7 @@ def login_user(username: str, password: str):
         sidebar_dropdown,
         sidebar_md,
         selected_case_id,
-        f"登入成功：{username}",
+        login_message,
         username,
         "",
         gr.update(visible=admin_visible),
@@ -1865,6 +2015,26 @@ def login_user(username: str, password: str):
     )
 
 
+def login_user(username: str, password: str, browser_payload: dict | None = None):
+    username = (username or "").strip()
+    password = (password or "").strip()
+    ok = authenticate_admin(username, password) or authenticate_user(username, password)
+    if not ok:
+        return build_login_response("", "登入失敗，請確認 username / password。", {"username": "", "session_token": ""})
+
+    token = create_session(username)
+    return build_login_response(username, f"登入成功：{username}", {"username": username, "session_token": token})
+
+
+def restore_browser_session(browser_payload: dict | None):
+    browser_payload = browser_payload or {}
+    username = (browser_payload.get("username") or "").strip()
+    token = (browser_payload.get("session_token") or "").strip()
+    if validate_session(username, token):
+        return build_login_response(username, f"已自動恢復登入：{username}", {"username": username, "session_token": token})
+    return build_login_response("", "", {"username": "", "session_token": ""})
+
+
 def register_user_ui(username: str, password: str, confirm_password: str):
     try:
         message = register_user(username, password, confirm_password)
@@ -1873,8 +2043,11 @@ def register_user_ui(username: str, password: str, confirm_password: str):
         return f"註冊失敗：{e}", username, "", ""
 
 
-def logout_user():
+def logout_user(username: str, browser_payload: dict | None = None):
+    browser_payload = browser_payload or {}
+    delete_session(username, browser_payload.get("session_token", ""))
     return (
+        {"username": "", "session_token": ""},
         "",
         current_user_md(""),
         gr.update(visible=True),
@@ -1902,6 +2075,7 @@ def logout_user():
 
 
 with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
+    browser_session = gr.BrowserState({"username": "", "session_token": ""}) if hasattr(gr, "BrowserState") else gr.State({"username": "", "session_token": ""})
     user_state = gr.State("")
     selected_case_id = gr.State("")
 
@@ -2011,6 +2185,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         add_hist = gr.Textbox(label="Additional History Obtained", lines=5)
                         pe2 = gr.Textbox(label="Physical Examination Findings", lines=5)
                         extra2 = gr.Textbox(label="Additional Data", lines=5)
+                        diagnosis2 = gr.Textbox(label="Diagnosis（可手動輸入；可用 [Actives]/[Underlyings] 分段）", lines=5)
 
                         with gr.Row():
                             btn_copy_to_stage2 = gr.Button("Copy Stage 1 Inputs to Stage 2")
@@ -2072,28 +2247,34 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         inputs=[register_username, register_password, register_password_confirm],
         outputs=[register_status, login_username, register_password, register_password_confirm],
     )
+    demo.load(
+        restore_browser_session,
+        inputs=[browser_session],
+        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+    )
     login_btn.click(
         login_user,
-        inputs=[login_username, login_password],
-        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        inputs=[login_username, login_password, browser_session],
+        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
     )
     login_password.submit(
         login_user,
-        inputs=[login_username, login_password],
-        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        inputs=[login_username, login_password, browser_session],
+        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
     )
     login_username.submit(
         login_user,
-        inputs=[login_username, login_password],
-        outputs=[user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        inputs=[login_username, login_password, browser_session],
+        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
     )
     logout_btn.click(
         logout_user,
+        inputs=[user_state, browser_session],
         outputs=[
-            user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview,
+            browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview,
             selected_case_id, login_status, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2142,7 +2323,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         outputs=[
             selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2156,7 +2337,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         outputs=[
             selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2170,7 +2351,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         inputs=[
             user_state, selected_case_id,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2184,7 +2365,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         outputs=[
             selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2209,7 +2390,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         outputs=[
             case_selector, case_list_preview, selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2,
+            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2232,10 +2413,10 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     )
     btn2.click(
         admission_stage2,
-        inputs=[user_state, selected_case_id, chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2],
+        inputs=[user_state, selected_case_id, chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2],
         outputs=[output2, case_summary, or_history],
     )
-    btn2_clear.click(lambda: empty_stage2(), outputs=[chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, output2])
+    btn2_clear.click(lambda: empty_stage2(), outputs=[chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2])
 
     weekly_btn.click(
         weekly_summary,
