@@ -15,7 +15,6 @@ import gradio as gr
 load_dotenv()
 
 
-
 # =========================================================
 # Config
 # =========================================================
@@ -1930,7 +1929,7 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
             browser_payload,
             "",
             current_user_md(""),
-            gr.update(visible=True),
+            gr.update(visible=not admin_visible),
             gr.update(visible=False),
             gr.update(choices=[], value=None),
             "### Cases\n\n_請先登入._",
@@ -1955,7 +1954,7 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
         username,
         current_user_md(username),
         gr.update(visible=False),
-        gr.update(visible=not admin_visible),
+        gr.update(visible=True),
         sidebar_dropdown,
         sidebar_md,
         selected_case_id,
@@ -2195,11 +2194,6 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         register_user_ui,
         inputs=[register_username, register_password, register_password_confirm],
         outputs=[register_status, login_username, register_password, register_password_confirm],
-    )
-    demo.load(
-        restore_browser_session,
-        inputs=[browser_session],
-        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     login_btn.click(
         login_user,
