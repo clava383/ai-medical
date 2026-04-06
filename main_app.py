@@ -357,31 +357,23 @@ def admin_case_choices(username: str, keyword: str = ""):
     return choices
 
 
-def admin_case_preview_md(username: str, case_id: str) -> str:
-    if not username or not case_id:
-        return "### Case Preview\n\n_尚未選擇 case。_"
-    db = load_db(username)
-    case = next((c for c in db.get("cases", []) if c.get("id") == case_id), None)
-    if not case:
-        return "### Case Preview\n\n_找不到這個 case。_"
 
+def admin_account_md(username: str) -> str:
+    if not username:
+        return "### 使用者帳號密碼\n\n_尚未選擇使用者。_"
+    user_record = get_user_record(username) or {}
+    created_at = user_record.get("created_at", "")
+    password_hash = user_record.get("password_hash", "")
+    password_salt = user_record.get("password_salt", "")
     lines = [
-        "### Case Preview",
+        "### 使用者帳號密碼",
         "",
-        f"- **MRN:** {case.get('mrn','')}",
-        f"- **Name:** {case.get('name','')}",
-        f"- **Age / Sex:** {case.get('age','')} / {case.get('sex','')}",
-        f"- **Status:** {case.get('status','')}",
-        f"- **Created:** {case.get('created_at','')}",
-        f"- **Updated:** {case.get('updated_at','')}",
+        f"- **Username:** {username}",
+        f"- **Created:** {created_at}",
+        f"- **Password hash:** `{password_hash}`" if password_hash else "- **Password hash:** _無資料_",
+        f"- **Password salt:** `{password_salt}`" if password_salt else "- **Password salt:** _無資料_",
         "",
-        "#### Available Outputs",
-        f"- Admission Stage 1: {'Yes' if case.get('admission',{}).get('stage1',{}).get('output') else 'No'}",
-        f"- Admission Stage 2: {'Yes' if case.get('admission',{}).get('stage2',{}).get('output') else 'No'}",
-        f"- Weekly: {'Yes' if case.get('weekly',{}).get('output') else 'No'}",
-        f"- Discharge: {'Yes' if case.get('discharge',{}).get('output') else 'No'}",
-        f"- OR Briefing: {'Yes' if case.get('or_briefing',{}).get('output') else 'No'}",
-        f"- Handoff: {'Yes' if case.get('handoff',{}).get('output') else 'No'}",
+        "> 目前系統不會保存可直接還原的明文密碼；後台只能看到登入帳號與已儲存的 password hash / salt。",
     ]
     return "\n".join(lines)
 
@@ -389,37 +381,14 @@ def admin_case_preview_md(username: str, case_id: str) -> str:
 def refresh_admin_user_search(current_username: str, keyword: str):
     if not is_admin_user(current_username):
         raise gr.Error("只有 admin 可以使用後台。")
-    return gr.update(choices=admin_user_choices(keyword), value=None), "### User Cases\n\n_尚未選擇使用者。_", "", "", "", gr.update(choices=[], value=None), "### Case Preview\n\n_尚未選擇 case。_"
+    return gr.update(choices=admin_user_choices(keyword), value=None), "### 使用者帳號密碼\n\n_尚未選擇使用者。_", "", "", ""
 
 
-def refresh_admin_case_list(current_username: str, target_username: str, keyword: str):
-    if not is_admin_user(current_username):
-        raise gr.Error("只有 admin 可以使用後台。")
-    return gr.update(choices=admin_case_choices(target_username, keyword), value=None), "### Case Preview\n\n_尚未選擇 case。_"
-
-
-def load_admin_case_preview(current_username: str, target_username: str, case_id: str):
-    if not is_admin_user(current_username):
-        raise gr.Error("只有 admin 可以使用後台。")
-    return admin_case_preview_md(target_username, case_id)
-
-def summarize_user_cases(username: str) -> str:
+def summarize_user_workspace(username: str) -> str:
     if not username:
-        return "### User Cases\n\n_尚未選擇使用者。_"
-    db = load_db(username)
-    cases = db.get("cases", [])
-    lines = [f"### {username} 的病例", "", f"- 帳號：{username}", f"- 病例數：{len(cases)}", ""]
-    if not cases:
-        lines.append("_沒有病例資料。_")
-        return "\n".join(lines)
-    for case in cases[:50]:
-        lines.append(
-            f"- **{case.get('mrn','')}** | {case.get('name','')} | {case.get('age','')} | {case.get('sex','')}  \\n"
-            f"  status: {case.get('status','')} · updated {case.get('updated_at','')}"
-        )
-    if len(cases) > 50:
-        lines.append(f"\n_And {len(cases)-50} more cases..._")
-    return "\n".join(lines)
+        return ""
+    user_db = load_db(username)
+    return json.dumps(user_db, ensure_ascii=False, indent=2)
 
 
 def load_admin_user_data(current_username: str, target_username: str):
@@ -427,24 +396,16 @@ def load_admin_user_data(current_username: str, target_username: str):
         raise gr.Error("只有 admin 可以使用後台。")
     if not target_username:
         return (
-            "### User Cases\n\n_尚未選擇使用者。_",
+            "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
             "",
             "",
             "尚未選擇使用者。",
-            gr.update(choices=[], value=None),
-            "### Case Preview\n\n_尚未選擇 case。_",
         )
-    user_record = get_user_record(target_username)
-    user_db = load_db(target_username)
-    pretty_user = json.dumps(user_record or {}, ensure_ascii=False, indent=2)
-    pretty_cases = json.dumps(user_db, ensure_ascii=False, indent=2)
     return (
-        summarize_user_cases(target_username),
-        pretty_user,
-        pretty_cases,
-        f"已載入使用者資料：{target_username}",
-        gr.update(choices=admin_case_choices(target_username), value=None),
-        "### Case Preview\n\n_尚未選擇 case。_",
+        admin_account_md(target_username),
+        summarize_user_workspace(target_username),
+        summarize_user_workspace(target_username),
+        f"已載入使用者資料與 workspace：{target_username}",
     )
 
 
@@ -471,12 +432,10 @@ def delete_registered_user(current_username: str, target_username: str):
 
     return (
         gr.update(choices=admin_user_choices(), value=None),
-        "### User Cases\n\n_尚未選擇使用者。_",
+        "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
         "",
         "",
         f"已刪除帳號：{target_username}",
-        gr.update(choices=[], value=None),
-        "### Case Preview\n\n_尚未選擇 case。_",
     )
 
 
@@ -1980,12 +1939,10 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
             "",
             gr.update(visible=False),
             gr.update(choices=[], value=None),
-            "### User Cases\n\n_尚未選擇使用者。_",
+            "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
             "",
             "",
             "",
-            gr.update(choices=[], value=None),
-            "### Case Preview\n\n_尚未選擇 case。_",
         )
 
     sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, "Active", "", None)
@@ -1997,7 +1954,7 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
         username,
         current_user_md(username),
         gr.update(visible=False),
-        gr.update(visible=True),
+        gr.update(visible=not admin_visible),
         sidebar_dropdown,
         sidebar_md,
         selected_case_id,
@@ -2006,12 +1963,10 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
         "",
         gr.update(visible=admin_visible),
         gr.update(choices=admin_choices, value=None),
-        "### User Cases\n\n_尚未選擇使用者。_",
+        "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
         "",
         "",
         "",
-        gr.update(choices=[], value=None),
-        "### Case Preview\n\n_尚未選擇 case。_",
     )
 
 
@@ -2065,12 +2020,10 @@ def logout_user(username: str, browser_payload: dict | None = None):
         *empty_handoff(),
         gr.update(visible=False),
         gr.update(choices=[], value=None),
-        "### User Cases\n\n_尚未選擇使用者。_",
+        "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
         "",
         "",
         "",
-        gr.update(choices=[], value=None),
-        "### Case Preview\n\n_尚未選擇 case。_",
     )
 
 
@@ -2082,21 +2035,16 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     current_user_banner = gr.Markdown("### 尚未登入")
     login_status = gr.Markdown("")
     with gr.Column(visible=False) as admin_panel:
-        gr.Markdown("## Admin 後台 v3")
+        gr.Markdown("## Admin 後台 v4")
         admin_user_search = gr.Textbox(label="搜尋帳號", placeholder="輸入 username")
         admin_user_selector = gr.Dropdown(label="選擇使用者", choices=[], value=None)
         with gr.Row():
             admin_load_btn = gr.Button("載入使用者資料")
             admin_delete_btn = gr.Button("刪除已註冊帳號", variant="stop")
-        admin_user_summary = gr.Markdown("### User Cases\n\n_尚未選擇使用者。_")
-        with gr.Row():
-            admin_case_search = gr.Textbox(label="搜尋 case", placeholder="輸入 MRN / 姓名 / 年齡 / 性別 / status")
-            admin_case_refresh_btn = gr.Button("刷新 Case 清單")
-        admin_case_selector = gr.Dropdown(label="Case 清單預覽", choices=[], value=None)
-        admin_case_preview = gr.Markdown("### Case Preview\n\n_尚未選擇 case。_")
-        gr.Markdown("可搜尋帳號、載入指定使用者資料，再搜尋與預覽該使用者的 case。")
-        admin_user_json = gr.Code(label="使用者帳號資料", language="json")
-        admin_cases_json = gr.Code(label="使用者所有輸入 / 輸出資料", language="json")
+        admin_user_summary = gr.Markdown("### 使用者帳號密碼\n\n_尚未選擇使用者。_")
+        admin_user_json = gr.Textbox(label="Workspace（該帳號所有 case / 輸入輸出）", lines=28)
+        admin_cases_json = gr.Textbox(label="Workspace 備份檢視", lines=28, visible=False)
+        gr.Markdown("後台只顯示使用者帳號資料與該帳號的 workspace，不提供新增 case。")
         admin_status = gr.Markdown("")
 
 
@@ -2250,22 +2198,22 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     demo.load(
         restore_browser_session,
         inputs=[browser_session],
-        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     login_btn.click(
         login_user,
         inputs=[login_username, login_password, browser_session],
-        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     login_password.submit(
         login_user,
         inputs=[login_username, login_password, browser_session],
-        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     login_username.submit(
         login_user,
         inputs=[login_username, login_password, browser_session],
-        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     logout_btn.click(
         logout_user,
@@ -2279,19 +2227,19 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
             handoff_problem, handoff_assessment, handoff_plan, handoff_out,
-            admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview,
+            admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status,
         ],
     )
 
     admin_load_btn.click(
         load_admin_user_data,
         inputs=[user_state, admin_user_selector],
-        outputs=[admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        outputs=[admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     admin_delete_btn.click(
         delete_registered_user,
         inputs=[user_state, admin_user_selector],
-        outputs=[admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        outputs=[admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
 
     # Sidebar refresh / filter
@@ -2461,24 +2409,8 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     admin_user_search.submit(
         refresh_admin_user_search,
         inputs=[user_state, admin_user_search],
-        outputs=[admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status, admin_case_selector, admin_case_preview],
+        outputs=[admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
-    admin_case_refresh_btn.click(
-        refresh_admin_case_list,
-        inputs=[user_state, admin_user_selector, admin_case_search],
-        outputs=[admin_case_selector, admin_case_preview],
-    )
-    admin_case_search.submit(
-        refresh_admin_case_list,
-        inputs=[user_state, admin_user_selector, admin_case_search],
-        outputs=[admin_case_selector, admin_case_preview],
-    )
-    admin_case_selector.change(
-        load_admin_case_preview,
-        inputs=[user_state, admin_user_selector, admin_case_selector],
-        outputs=[admin_case_preview],
-    )
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
