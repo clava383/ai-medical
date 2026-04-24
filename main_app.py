@@ -6,7 +6,7 @@ import secrets
 import hashlib
 import re
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from openai import OpenAI
@@ -317,6 +317,24 @@ def user_activities(username: str = "", limit: int = 50) -> list[dict]:
     return list(reversed(acts[-limit:]))
 
 
+def recent_login_activities(username: str = "", days: int = 7) -> list[dict]:
+    cutoff = datetime.now() - timedelta(days=days)
+    db = load_activity_db()
+    results = []
+    for act in db.get("activities", []):
+        if username and act.get("username") != username:
+            continue
+        if act.get("action") != "login":
+            continue
+        try:
+            t = datetime.fromisoformat(act.get("time", ""))
+        except Exception:
+            continue
+        if t >= cutoff:
+            results.append(act)
+    return list(reversed(results))
+
+
 def generate_temp_password(length: int = 10) -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
     return "".join(secrets.choice(alphabet) for _ in range(length))
@@ -483,7 +501,7 @@ def admin_account_md(username: str) -> str:
     last_login_at = user_record.get("last_login_at", "")
     password = user_record.get("password", "")
     sessions = user_sessions(username)
-    activities = user_activities(username, 30)
+    activities = recent_login_activities(username, 7)
 
     lines = [
         "### 帳號資訊",
@@ -508,14 +526,14 @@ def admin_account_md(username: str) -> str:
     else:
         lines.append("- _目前沒有 active session_")
 
-    lines += ["", "### Activity Log"]
+    lines += ["", "### 近七天登入紀錄"]
     if activities:
         for act in activities:
             detail = act.get("detail", "")
             detail_text = f" · {detail}" if detail else ""
             lines.append(f"- {act.get('time','')} · **{act.get('action','')}**{detail_text}")
     else:
-        lines.append("- _尚無活動紀錄_")
+        lines.append("- _近七天沒有登入紀錄_")
 
     return "\n".join(lines)
 
@@ -540,7 +558,7 @@ def admin_account_details_json(username: str) -> str:
         {
             "user": get_user_record(username) or {},
             "active_sessions": user_sessions(username),
-            "activity_log": user_activities(username, 100),
+            "recent_login_records_7_days": recent_login_activities(username, 7),
         },
         ensure_ascii=False,
         indent=2,
@@ -612,7 +630,7 @@ def admin_reset_password(current_username: str, target_username: str):
     if not target_username:
         raise gr.Error("請先選擇使用者。")
 
-    new_pw = generate_temp_password(10)
+    new_pw = "111111"
     set_user_plaintext_password(target_username, new_pw)
     delete_session(target_username)
     log_activity(target_username, "admin_reset_password", f"Password reset by {current_username}")
@@ -620,7 +638,7 @@ def admin_reset_password(current_username: str, target_username: str):
         admin_account_md(target_username),
         admin_account_details_json(target_username),
         admin_account_details_json(target_username),
-        f"已 reset {target_username} 密碼。新密碼：{new_pw}",
+        f"已 reset {target_username} 密碼。新密碼固定為：{new_pw}",
     )
 
 
@@ -2404,7 +2422,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     current_user_banner = gr.Markdown("### 尚未登入")
     login_status = gr.Markdown("")
     with gr.Column(visible=False) as admin_panel:
-        gr.Markdown("## Admin 後台 v7（帳號管理測試版）")
+        gr.Markdown("## Admin 後台 v7.1（帳號管理測試版）")
         admin_user_search = gr.Textbox(label="搜尋帳號", placeholder="輸入 username")
         admin_user_selector = gr.Dropdown(label="選擇使用者", choices=[], value=None)
         with gr.Row():
@@ -2412,8 +2430,8 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
             admin_reset_btn = gr.Button("Reset Password")
             admin_delete_btn = gr.Button("刪除已註冊帳號", variant="stop")
         admin_user_summary = gr.Markdown("### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_")
-        admin_user_json = gr.Textbox(label="帳號 / active sessions / activity log（JSON 備份檢視）", lines=18)
-        admin_cases_json = gr.Textbox(label="備份檢視", lines=18, visible=False)
+        admin_user_json = gr.Textbox(label="帳號資訊備用輸出", lines=1, visible=False)
+        admin_cases_json = gr.Textbox(label="備用輸出", lines=1, visible=False)
         gr.Markdown("測試版：密碼以明文儲存；正式版請改回 hash + salt。選擇使用者後也可以載入 Clinical AI Workspace 查看 case。")
         admin_status = gr.Markdown("")
 
