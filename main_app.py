@@ -53,14 +53,40 @@ def parse_timeline_date(date_str: str):
     date_str = (date_str or "").strip()
     if not date_str:
         return None
-    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%m/%d"):
+
+    normalized = date_str
+    normalized = normalized.replace("年", "/").replace("月", "/").replace("日", "")
+    normalized = normalized.replace("-", "/")
+    normalized = re.sub(r"/+$", "", normalized)
+
+    for fmt in ("%Y/%m/%d", "%Y/%m", "%m/%d"):
         try:
-            parsed = datetime.strptime(date_str, fmt)
+            parsed = datetime.strptime(normalized, fmt)
             if fmt == "%m/%d":
                 parsed = parsed.replace(year=datetime.now().year)
+            if fmt == "%Y/%m":
+                parsed = parsed.replace(day=1)
             return parsed
         except ValueError:
             continue
+    return None
+
+
+def extract_first_timeline_date(text: str):
+    text = text or ""
+    patterns = [
+        r"20\d{2}[/-]\d{1,2}[/-]\d{1,2}",
+        r"20\d{2}年\d{1,2}月\d{1,2}日",
+        r"20\d{2}[/-]\d{1,2}",
+        r"20\d{2}年\d{1,2}月",
+        r"\b\d{1,2}/\d{1,2}\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if m:
+            parsed = parse_timeline_date(m.group(0))
+            if parsed:
+                return parsed
     return None
 
 
@@ -73,16 +99,33 @@ def sort_timeline_text(timeline_text: str) -> str:
     undated_items = []
     for idx, line in enumerate(lines):
         stripped = line.strip()
-        match = re.search(r"(20\d{2}[/-]\d{1,2}[/-]\d{1,2}|\b\d{1,2}/\d{1,2}\b)", stripped)
-        parsed = parse_timeline_date(match.group(1)) if match else None
+        parsed = extract_first_timeline_date(stripped)
         if parsed is None:
             undated_items.append((idx, stripped))
         else:
             dated_items.append((parsed, idx, stripped))
 
+    # Earliest event first, most recent event last. Keep undated contextual items at the top
+    # only if they are clearly background; otherwise preserve their original relative order at the end.
     dated_items.sort(key=lambda x: (x[0], x[1]))
     ordered = [item[2] for item in dated_items] + [item[1] for item in undated_items]
     return "\n".join(ordered)
+
+
+def build_timeline_source_text(history_text: str, outpatient_notes: str, emergency_notes: str, consult_notes: str, additional_history: str = "", extra_recent_history: str = "") -> str:
+    sections = [
+        ("Known history / Previous notes", history_text),
+        ("Outpatient notes / OPD record", outpatient_notes),
+        ("Emergency department notes / ER record", emergency_notes),
+        ("Consultation notes", consult_notes),
+        ("Additional history obtained", additional_history),
+        ("Extra recent pre-admission history", extra_recent_history),
+    ]
+    parts = []
+    for title, body in sections:
+        if (body or "").strip():
+            parts.append(f"[{title}]\n{body.strip()}")
+    return "\n\n".join(parts)
 
 
 def sanitize_filename(text: str, max_len: int = 40) -> str:
@@ -98,11 +141,11 @@ def empty_case_form():
 
 
 def empty_stage1():
-    return "", "", "", "", "", "", "", ""
+    return "", "", "", "", "", "", "", "", ""
 
 
 def empty_stage2():
-    return "", "", "", "", "", "", "", "", "", "", "", ""
+    return "", "", "", "", "", "", "", "", "", "", "", "", "", ""
 
 
 def empty_weekly():
@@ -139,6 +182,7 @@ def default_case_record(mrn: str, name: str, age: str, sex: str) -> dict:
                 "history_text": "",
                 "outpatient_notes": "",
                 "emergency_notes": "",
+                "consult_notes": "",
                 "labs": "",
                 "timeline_output": "",
                 "checklist_output": "",
@@ -150,11 +194,13 @@ def default_case_record(mrn: str, name: str, age: str, sex: str) -> dict:
                 "history_text": "",
                 "outpatient_notes": "",
                 "emergency_notes": "",
+                "consult_notes": "",
                 "timeline_text": "",
                 "labs": "",
                 "additional_history": "",
                 "pe_findings": "",
                 "extra_data": "",
+                "admission_date": "",
                 "diagnosis": "",
                 "output": "",
             },
@@ -684,6 +730,15 @@ def remove_duplicate_diagnosis_blocks(active_blocks: list[str], underlying_block
     return filtered_active, filtered_underlying
 
 
+def is_treatment_or_detail_line(line: str) -> bool:
+    stripped = (line or "").strip()
+    lower = stripped.lower()
+    return (
+        stripped.startswith(("-", "*"))
+        or lower.startswith(("status post", "s/p", "post-op", "post op", "underwent", "received"))
+    )
+
+
 def parse_manual_diagnosis_text(diagnosis_text: str) -> tuple[str, str, str]:
     lines = [ln.rstrip() for ln in (diagnosis_text or "").splitlines() if ln.strip()]
     if not lines:
@@ -692,6 +747,9 @@ def parse_manual_diagnosis_text(diagnosis_text: str) -> tuple[str, str, str]:
     active_lines: list[str] = []
     underlying_lines: list[str] = []
     current = "active"
+
+    def target_list():
+        return underlying_lines if current == "underlying" else active_lines
 
     for line in lines:
         stripped = line.strip()
@@ -703,50 +761,57 @@ def parse_manual_diagnosis_text(diagnosis_text: str) -> tuple[str, str, str]:
             current = "underlying"
             continue
 
-        if stripped.startswith("#."):
-            normalized = f"#. {stripped[2:].strip()}"
-        elif stripped.startswith("#"):
-            normalized = f"#. {stripped.lstrip('#').strip()}"
-        else:
-            normalized = f"#. {stripped}"
+        target = target_list()
+        # Do NOT add # automatically. Lines starting with '-' or 'status post' are treated as
+        # treatment/detail lines under the preceding diagnosis, not as new diagnoses.
+        if is_treatment_or_detail_line(stripped):
+            if target:
+                target.append(stripped)
+            continue
 
-        if current == "underlying":
-            underlying_lines.append(normalized)
-        else:
-            active_lines.append(normalized)
+        target.append(stripped)
 
     if not active_lines and underlying_lines:
         active_lines, underlying_lines = underlying_lines, []
 
-    active_text = "\n".join(dict.fromkeys(active_lines)) if active_lines else "UNKNOWN"
-    underlying_text = "\n".join(dict.fromkeys(underlying_lines)) if underlying_lines else "UNKNOWN"
+    def dedupe_preserve_order(items: list[str]) -> list[str]:
+        seen = set()
+        out = []
+        for item in items:
+            key = normalize_dx_line(item)
+            if key not in seen:
+                out.append(item)
+                seen.add(key)
+        return out
+
+    active_lines = dedupe_preserve_order(active_lines)
+    underlying_lines = dedupe_preserve_order(underlying_lines)
+
+    active_text = "\n".join(active_lines) if active_lines else "UNKNOWN"
+    underlying_text = "\n".join(underlying_lines) if underlying_lines else "UNKNOWN"
     plan_text = build_plan_active_titles(active_text) if active_text != "UNKNOWN" else "UNKNOWN"
     return active_text, underlying_text, plan_text
 
 
 def extract_plan_title_from_dx_line(line: str) -> str:
     stripped = (line or "").strip()
-    if not stripped:
+    if not stripped or is_treatment_or_detail_line(stripped):
         return ""
 
-    prefix = "#."
-    body = stripped[2:].strip() if stripped.startswith(prefix) else stripped
+    body = stripped[2:].strip() if stripped.startswith("#.") else stripped.lstrip("#").strip()
     for sep in [", status post", ", s/p", " status post", " s/p", ", with recurrence", " with recurrence"]:
         idx = body.lower().find(sep)
         if idx != -1:
             body = body[:idx].strip(" ,;")
             break
-    return f"#. {body}" if body else stripped
+    return body or stripped
 
 
 def build_plan_active_titles(active_text: str) -> str:
     titles: list[str] = []
     seen: set[str] = set()
     for line in (active_text or "").splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("#."):
-            continue
-        plan_title = extract_plan_title_from_dx_line(stripped)
+        plan_title = extract_plan_title_from_dx_line(line)
         norm = normalize_dx_line(plan_title)
         if plan_title and norm not in seen:
             titles.append(plan_title)
@@ -767,14 +832,28 @@ def extract_relevant_admission_date(*texts: str) -> str:
     return matches[-1] if matches else "UNKNOWN DATE"
 
 
-def build_forced_diagnosis_sections(chief_complaint: str, admission_purpose: str, history_text: str, outpatient_notes: str, emergency_notes: str, timeline_text: str, additional_history: str, extra_data: str, manual_diagnosis_text: str = "") -> tuple[str, str, str, str]:
-    admission_date_text = extract_relevant_admission_date(timeline_text, additional_history, extra_data, emergency_notes, outpatient_notes, history_text)
+def build_forced_diagnosis_sections(
+    chief_complaint: str,
+    admission_purpose: str,
+    history_text: str,
+    outpatient_notes: str,
+    emergency_notes: str,
+    consult_notes: str,
+    timeline_text: str,
+    additional_history: str,
+    extra_data: str,
+    manual_diagnosis_text: str = "",
+    admission_date: str = "",
+) -> tuple[str, str, str, str]:
+    admission_date_text = (admission_date or "").strip() or extract_relevant_admission_date(
+        admission_purpose, timeline_text, additional_history, extra_data, emergency_notes, outpatient_notes, consult_notes, history_text
+    )
 
     if (manual_diagnosis_text or "").strip():
         manual_active_dx, manual_underlying_dx, manual_plan_dx = parse_manual_diagnosis_text(manual_diagnosis_text)
         return manual_active_dx or "UNKNOWN", manual_underlying_dx or "UNKNOWN", manual_plan_dx or "UNKNOWN", admission_date_text
 
-    blocks = collect_latest_diagnosis_blocks(history_text, outpatient_notes, emergency_notes, additional_history, extra_data)
+    blocks = collect_latest_diagnosis_blocks(history_text, outpatient_notes, emergency_notes, consult_notes, additional_history, extra_data)
     if not blocks:
         return "UNKNOWN", "UNKNOWN", "UNKNOWN", admission_date_text
 
@@ -786,6 +865,7 @@ def build_forced_diagnosis_sections(chief_complaint: str, admission_purpose: str
         extra_data or "",
         outpatient_notes or "",
         emergency_notes or "",
+        consult_notes or "",
     ])
 
     scored = [(block, block_activity_score(block, context_text)) for block in blocks]
@@ -819,7 +899,6 @@ def build_forced_diagnosis_sections(chief_complaint: str, admission_purpose: str
     active_text = "\n".join(active_blocks) if active_blocks else "UNKNOWN"
     underlying_text = "\n".join(underlying_blocks) if underlying_blocks else "UNKNOWN"
     plan_active_titles = build_plan_active_titles(active_text)
-    admission_date_text = extract_relevant_admission_date(timeline_text, additional_history, extra_data, emergency_notes, outpatient_notes, history_text)
     return active_text, underlying_text, plan_active_titles, admission_date_text
 
 
@@ -975,7 +1054,9 @@ STRICT RULES:
 - Output should be easy for a PGY to use during bedside history taking
 - Do NOT write long paragraphs
 - Timeline must be based ONLY on provided information
-- Emergency department notes should be incorporated when provided
+- Timeline MUST integrate all input fields: known history, OPD notes, ER notes, consultation notes, labs/imaging, and admission purpose when relevant
+- Timeline MUST be sorted chronologically: earliest event at the top, most recent event at the bottom
+- Emergency department notes and consultation notes should be incorporated when provided
 - If exact date is unavailable, use approximate wording such as "previously", "recently", "on admission"
 - For the checklist, you MUST actively check whether the provided information already includes the following domains:
   past history, family history, surgical history, medication history, allergy history, smoking/alcohol/betel nut history, Chinese herbs or health supplements, TOCC if fever or suspected infection is mentioned
@@ -1026,7 +1107,7 @@ STRICT RULES:
 - DO NOT fabricate physical exam or lab
 - Use formal clinical English
 - Follow EXACT formatting rules
-- Outpatient notes and timeline are supporting materials and should be integrated when relevant
+- Outpatient notes, emergency notes, consultation notes, Stage 1 timeline, and extra recent pre-admission history are supporting materials and should be integrated when relevant
 - The diagnosis wording at the beginning of Present illness is the SINGLE source of truth for the later Tentative Diagnosis and Assessment sections
 - Any diagnosis copied later MUST keep EXACT same wording, spelling, punctuation, order, and disease naming
 - You may only separate diagnoses into Actives and Underlyings; do NOT rename, merge, split, expand, or shorten them
@@ -1044,6 +1125,9 @@ CRITICAL DIAGNOSIS TEMPLATE RULES
 
 CRITICAL PRESENT ILLNESS WRITING RULES
 - Present illness should read like a coherent clinical story, not a bullet-point timeline.
+- Integrate all source material chronologically: known history, outpatient notes, emergency notes, consultation notes, Stage 1 timeline, additional history, and extra recent pre-admission history.
+- The chronology must go from remote/earliest events to recent/current events.
+- Extra recent pre-admission history should be integrated into the LATE PART of Present illness because it represents events closest to this admission.
 - Integrate all available timeline information into one flowing narrative paragraph or short paragraphs.
 - More recent events should be described in greater detail.
 - More remote events can be summarized briefly.
@@ -1059,7 +1143,7 @@ CRITICAL PRESENT ILLNESS WRITING RULES
 - The ending sentence of Present illness MUST close with this structure:
   "Due to the reason of ... , the patient was admitted on X/X."
 - The reason in that sentence must be mainly based on Admission purpose and supported by the provided history.
-- Use the provided [FORCED ADMISSION DATE] for X/X when available; if unavailable, write UNKNOWN DATE.
+- Use the provided [FORCED ADMISSION DATE] for X/X when available; if unavailable, write UNKNOWN DATE. Do NOT infer admission date from unrelated historical dates.
 
 ========================
 FORMAT REQUIREMENTS
@@ -1073,15 +1157,18 @@ FORMAT REQUIREMENTS
 【Present illness】
 - MUST start with:
 "This is a XX-year-old man/woman with the following underlying diseases:"
-- Immediately after the above sentence, list the diagnoses in TWO groups using the exact format below:
+- Immediately after the above sentence, list the diagnoses in TWO groups using the exact format below.
+- Use diagnosis lines EXACTLY as provided in [FORCED ACTIVE DIAGNOSES] and [FORCED UNDERLYING DIAGNOSES].
+- Do NOT add # or #. if the provided diagnosis line does not already have it.
+- Lines beginning with '-' or 'status post' are treatment/procedure details under the preceding diagnosis and must NOT be treated as separate diagnoses.
 
 [Actives]
-# diagnosis 1
-# diagnosis 2
+diagnosis 1
+diagnosis 2
 
 [Underlyings]
-# diagnosis 1
-# diagnosis 2
+diagnosis 1
+diagnosis 2
 
 - The diagnosis lines above are the source of truth
 - The same diagnosis lines MUST be copied verbatim later into Tentative Diagnosis and Assessment
@@ -1134,12 +1221,12 @@ FORMAT REQUIREMENTS
 - ONLY separate into the same two groups below
 
 【Actives】
-# diagnosis 1
-# diagnosis 2
+diagnosis 1
+diagnosis 2
 
 【Underlyings】
-# diagnosis 1
-# diagnosis 2
+diagnosis 1
+diagnosis 2
 
 十. 醫療需求與治療計畫(Medical Needs and Care Plan)
 
@@ -1188,7 +1275,7 @@ RULES:
 → DO NOT include status post details, procedure history, recurrence sub-lines, or treatment suffixes in the plan headers
 → FORMAT:
 
-# Disease name
+Disease name
 - treatment
 - monitoring
 - supportive care
@@ -1496,8 +1583,8 @@ def load_selected_case(username, case_id):
     return (
         case["id"],
         patient_summary_md(case),
-        s1["chief_complaint"], s1["admission_purpose"], s1["history_text"], s1.get("outpatient_notes", ""), s1.get("emergency_notes", ""), s1["labs"], s1.get("timeline_output", ""), s1.get("checklist_output", s1.get("output", "")),
-        s2["chief_complaint"], s2["admission_purpose"], s2["history_text"], s2.get("outpatient_notes", ""), s2.get("emergency_notes", ""), s2.get("timeline_text", ""), s2["labs"], s2["additional_history"], s2["pe_findings"], s2["extra_data"], s2.get("diagnosis", ""), s2["output"],
+        s1["chief_complaint"], s1["admission_purpose"], s1["history_text"], s1.get("outpatient_notes", ""), s1.get("emergency_notes", ""), s1.get("consult_notes", ""), s1["labs"], s1.get("timeline_output", ""), s1.get("checklist_output", s1.get("output", "")),
+        s2["chief_complaint"], s2["admission_purpose"], s2["history_text"], s2.get("outpatient_notes", ""), s2.get("emergency_notes", ""), s2.get("consult_notes", ""), s2.get("timeline_text", ""), s2["labs"], s2["additional_history"], s2["pe_findings"], s2["extra_data"], s2.get("admission_date", ""), s2.get("diagnosis", ""), s2["output"],
         weekly["events"], weekly["previous_weekly"], weekly["output"],
         auto_discharge_weekly, discharge["final_events"], discharge["output"],
         auto_or_history, orb["meds"], orb["surgery"], orb["extra"], orb["output"],
@@ -1570,8 +1657,8 @@ def delete_case(username, case_id, status_filter, keyword):
 def save_workspace(
     username,
     case_id,
-    chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, checklist1,
-    chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
+    chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, checklist1,
+    chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
     weekly_events, weekly_prev, weekly_out,
     discharge_weekly, discharge_events, discharge_out,
     or_history, or_meds, or_surgery, or_extra, or_out,
@@ -1589,6 +1676,7 @@ def save_workspace(
                 "history_text": history1,
                 "outpatient_notes": outpatient1,
                 "emergency_notes": emergency1,
+                "consult_notes": consult1,
                 "labs": labs1,
                 "timeline_output": sort_timeline_text(timeline1),
                 "checklist_output": checklist1,
@@ -1603,11 +1691,13 @@ def save_workspace(
                 "history_text": history2,
                 "outpatient_notes": outpatient2,
                 "emergency_notes": emergency2,
+                "consult_notes": consult2,
                 "timeline_text": sort_timeline_text(timeline2),
                 "labs": labs2,
                 "additional_history": add_hist,
                 "pe_findings": pe2,
                 "extra_data": extra2,
+                "admission_date": admission_date2,
                 "diagnosis": diagnosis2,
                 "output": output2,
             }),
@@ -1646,8 +1736,9 @@ def refresh_sidebar_ui(username, status_filter, keyword, selected_case_id):
 # =========================================================
 # Core workflow functions
 # =========================================================
-def admission_stage1(username, case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, labs):
+def admission_stage1(username, case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, consult_notes, labs):
     case = require_case(username, case_id)
+    timeline_source = build_timeline_source_text(history_text, outpatient_notes, emergency_notes, consult_notes)
     user_input = f"""
 Chief complaint: {chief_complaint}
 
@@ -1661,6 +1752,12 @@ Outpatient notes / OPD record:
 
 Emergency department notes / ER record:
 {emergency_notes}
+
+Consultation notes / Consult record:
+{consult_notes}
+
+All timeline source material to integrate and sort chronologically:
+{timeline_source}
 
 Labs / imaging:
 {labs}
@@ -1683,6 +1780,7 @@ Labs / imaging:
                 "history_text": history_text,
                 "outpatient_notes": outpatient_notes,
                 "emergency_notes": emergency_notes,
+                "consult_notes": consult_notes,
                 "labs": labs,
                 "timeline_output": timeline_output,
                 "checklist_output": checklist_output,
@@ -1693,9 +1791,12 @@ Labs / imaging:
     return timeline_output, checklist_output, patient_summary_md(updated)
 
 
-def admission_stage2(username, case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, timeline_text, labs, additional_history, pe_findings, extra_data, diagnosis_text):
+def admission_stage2(username, case_id, chief_complaint, admission_purpose, history_text, outpatient_notes, emergency_notes, consult_notes, timeline_text, labs, additional_history, pe_findings, extra_data, admission_date, diagnosis_text):
     case = require_case(username, case_id)
 
+    timeline_source = build_timeline_source_text(
+        history_text, outpatient_notes, emergency_notes, consult_notes, additional_history, extra_data
+    )
     timeline_text = sort_timeline_text(timeline_text)
 
     forced_active_dx, forced_underlying_dx, plan_active_dx, forced_admission_date = build_forced_diagnosis_sections(
@@ -1704,16 +1805,21 @@ def admission_stage2(username, case_id, chief_complaint, admission_purpose, hist
         history_text,
         outpatient_notes,
         emergency_notes,
+        consult_notes,
         timeline_text,
         additional_history,
         extra_data,
         diagnosis_text,
+        admission_date,
     )
 
     user_input = f"""
 Chief complaint: {chief_complaint}
 
 Admission purpose: {admission_purpose}
+
+Admission date provided by user:
+{admission_date}
 
 Known history:
 {history_text}
@@ -1724,8 +1830,14 @@ Outpatient notes / OPD record:
 Emergency department notes / ER record:
 {emergency_notes}
 
-Current history timeline:
+Consultation notes / Consult record:
+{consult_notes}
+
+Current history timeline generated in Stage 1:
 {timeline_text}
+
+All source material for chronological integration:
+{timeline_source}
 
 Labs / imaging:
 {labs}
@@ -1736,7 +1848,7 @@ Additional history obtained:
 Physical examination findings:
 {pe_findings}
 
-Additional data:
+Extra recent pre-admission history:
 {extra_data}
 
 Manual diagnosis seed / editable diagnosis:
@@ -1766,11 +1878,13 @@ Manual diagnosis seed / editable diagnosis:
                 "history_text": history_text,
                 "outpatient_notes": outpatient_notes,
                 "emergency_notes": emergency_notes,
+                "consult_notes": consult_notes,
                 "timeline_text": timeline_text,
                 "labs": labs,
                 "additional_history": additional_history,
                 "pe_findings": pe_findings,
                 "extra_data": extra_data,
+                "admission_date": admission_date,
                 "diagnosis": diagnosis_text,
                 "output": result,
             }
@@ -1778,7 +1892,6 @@ Manual diagnosis seed / editable diagnosis:
     )
     auto_or_history = history_text or updated["admission"]["stage1"].get("history_text", "")
     return result, patient_summary_md(updated), auto_or_history
-
 
 
 def handoff_summary(username, case_id, problem, assessment, plan):
@@ -1896,8 +2009,8 @@ Additional info:
 # =========================================================
 # Cross-fill helpers
 # =========================================================
-def copy_stage1_to_stage2(chief, purpose, history, outpatient_notes, emergency_notes, timeline_text, labs):
-    return chief, purpose, history, outpatient_notes, emergency_notes, timeline_text, labs
+def copy_stage1_to_stage2(chief, purpose, history, outpatient_notes, emergency_notes, consult_notes, timeline_text, labs):
+    return chief, purpose, history, outpatient_notes, emergency_notes, consult_notes, timeline_text, labs
 
 
 def copy_weekly_to_discharge(weekly_output):
@@ -1929,7 +2042,7 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
             browser_payload,
             "",
             current_user_md(""),
-            gr.update(visible=not admin_visible),
+            gr.update(visible=True),
             gr.update(visible=False),
             gr.update(choices=[], value=None),
             "### Cases\n\n_請先登入._",
@@ -2111,6 +2224,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         history1 = gr.Textbox(label="Known History / Previous Notes (中英皆可)", lines=10)
                         outpatient1 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
                         emergency1 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
+                        consult1 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄）", lines=6)
                         labs1 = gr.Textbox(label="Labs / Imaging (brief)", lines=5)
 
                         with gr.Row():
@@ -2128,12 +2242,14 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         history2 = gr.Textbox(label="Known History / Previous Notes", lines=10)
                         outpatient2 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
                         emergency2 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
+                        consult2 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄）", lines=6)
                         timeline2 = gr.Textbox(label="Current History Timeline", lines=6)
                         labs2 = gr.Textbox(label="Labs / Imaging", lines=5)
                         add_hist = gr.Textbox(label="Additional History Obtained", lines=5)
                         pe2 = gr.Textbox(label="Physical Examination Findings", lines=5)
-                        extra2 = gr.Textbox(label="Additional Data", lines=5)
-                        diagnosis2 = gr.Textbox(label="Diagnosis（可手動輸入；可用 [Actives]/[Underlyings] 分段）", lines=5)
+                        extra2 = gr.Textbox(label="額外病史（住院前近期病史）", lines=5)
+                        admission_date2 = gr.Textbox(label="Admission Date（入院日期，建議 YYYY/MM/DD）", lines=2)
+                        diagnosis2 = gr.Textbox(label="Diagnosis（可手動輸入；可用 [Actives]/[Underlyings] 分段；不會自動加 #）", lines=5)
 
                         with gr.Row():
                             btn_copy_to_stage2 = gr.Button("Copy Stage 1 Inputs to Stage 2")
@@ -2216,8 +2332,8 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         outputs=[
             browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview,
             selected_case_id, login_status, case_summary,
-            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
+            chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2265,8 +2381,8 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         inputs=[user_state, case_selector],
         outputs=[
             selected_case_id, case_summary,
-            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
+            chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2279,8 +2395,8 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         inputs=[user_state, case_selector],
         outputs=[
             selected_case_id, case_summary,
-            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
+            chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2293,8 +2409,8 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         save_workspace,
         inputs=[
             user_state, selected_case_id,
-            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
+            chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2307,8 +2423,8 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         inputs=[user_state, selected_case_id],
         outputs=[
             selected_case_id, case_summary,
-            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
+            chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2332,8 +2448,8 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         inputs=[user_state, selected_case_id, status_filter, case_search],
         outputs=[
             case_selector, case_list_preview, selected_case_id, case_summary,
-            chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1,
-            chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2,
+            chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
+            chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
             weekly_events, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
@@ -2344,22 +2460,22 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
 
     btn1.click(
         admission_stage1,
-        inputs=[user_state, selected_case_id, chief1, purpose1, history1, outpatient1, emergency1, labs1],
+        inputs=[user_state, selected_case_id, chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1],
         outputs=[timeline1, output1, case_summary],
     )
-    btn1_clear.click(lambda: empty_stage1(), outputs=[chief1, purpose1, history1, outpatient1, emergency1, labs1, timeline1, output1])
+    btn1_clear.click(lambda: empty_stage1(), outputs=[chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1])
 
     btn_copy_to_stage2.click(
         copy_stage1_to_stage2,
-        inputs=[chief1, purpose1, history1, outpatient1, emergency1, timeline1, labs1],
-        outputs=[chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2],
+        inputs=[chief1, purpose1, history1, outpatient1, emergency1, consult1, timeline1, labs1],
+        outputs=[chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2],
     )
     btn2.click(
         admission_stage2,
-        inputs=[user_state, selected_case_id, chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2],
+        inputs=[user_state, selected_case_id, chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2],
         outputs=[output2, case_summary, or_history],
     )
-    btn2_clear.click(lambda: empty_stage2(), outputs=[chief2, purpose2, history2, outpatient2, emergency2, timeline2, labs2, add_hist, pe2, extra2, diagnosis2, output2])
+    btn2_clear.click(lambda: empty_stage2(), outputs=[chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2])
 
     weekly_btn.click(
         weekly_summary,
@@ -2418,3 +2534,4 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=port,
     )
+
