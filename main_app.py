@@ -149,7 +149,7 @@ def empty_stage2():
 
 
 def empty_weekly():
-    return "", "", ""
+    return "", "", "", "", "", ""
 
 
 def empty_discharge():
@@ -206,7 +206,10 @@ def default_case_record(mrn: str, name: str, age: str, sex: str) -> dict:
             },
         },
         "weekly": {
-            "events": "",
+            "week_range": "",
+            "assessment": "",
+            "lab": "",
+            "exam_results": "",
             "previous_weekly": "",
             "output": "",
         },
@@ -442,16 +445,30 @@ def load_admin_user_data(current_username: str, target_username: str):
         raise gr.Error("只有 admin 可以使用後台。")
     if not target_username:
         return (
+            "",
+            gr.update(visible=False),
+            gr.update(choices=[], value=None),
+            "### Cases\n\n_尚未選擇使用者。_",
+            None,
+            "### No case selected\n請先選擇使用者。",
             "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
             "",
             "",
             "尚未選擇使用者。",
         )
+
+    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(target_username, "Active", "", None)
     return (
+        target_username,
+        gr.update(visible=True),
+        sidebar_dropdown,
+        sidebar_md,
+        selected_case_id,
+        f"### Admin viewing Clinical AI Workspace\n目前正在查看使用者：**{target_username}**\n\n請從左側病人列表選擇 case，即可像一般 workspace 一樣查看輸入與輸出。",
         admin_account_md(target_username),
         summarize_user_workspace(target_username),
         summarize_user_workspace(target_username),
-        f"已載入使用者資料與 workspace：{target_username}",
+        f"已載入使用者資料與 Clinical AI Workspace：{target_username}",
     )
 
 
@@ -1287,33 +1304,60 @@ STYLE
 - Structured, clean, professional
 """
 WEEKLY_PROMPT = """
-You are a clinical assistant generating weekly summaries.
+You are a clinical assistant generating cumulative weekly inpatient summaries.
 
 STRICT RULES:
-- Do NOT hallucinate
-- Only use provided information
-- Do NOT include events before admission
+- Do NOT hallucinate.
+- Only use provided information.
+- Do NOT include events before admission unless they are required as very brief context.
+- The output MUST be cumulative: include clinically important content from Previous weekly summary and then add this week's new assessment, lab, and examination results.
+- Previous weekly content may be condensed, but clinically important diagnoses, treatments, complications, and trend changes must be preserved.
+- Sort the whole clinical course chronologically: earliest inpatient events first, most recent events last.
+- If a week/date range is provided, use it to identify which data belongs to the current week.
+- If current-week data includes older/background information, integrate it only when clinically relevant and avoid presenting it as a new event.
+- If timing is unclear, write "Timing unclear" rather than inventing a date.
+- Use professional clinical English.
+
+INPUT SECTIONS:
+1. Week/date range
+2. Current week assessment
+3. Current week lab
+4. Current week examination results
+5. Previous weekly summary
 
 TASK:
 Generate TWO versions:
 
 ========================
-1. Structured Weekly Summary
+1. Structured Cumulative Weekly Summary
 ========================
 
 Format:
 
 【Weekly Summary】
 
-Since admission, the patient has undergone the following clinical course:
+[Coverage]
+- Week/date range: ...
 
-- timeline events
+[Chronological Clinical Course]
+- earliest inpatient event / prior weekly event
+- subsequent event
+- this week's new event
+- most recent status
 
-During this period, the clinical course was characterized by:
-- key clinical features
+[Assessment]
+- concise problem-based assessment, integrating previous and current week
 
-Currently, the patient is:
-- current status
+[Lab]
+- summarize important lab trends and current-week key values
+
+[Examination / Imaging / Procedure Results]
+- summarize important examination, imaging, pathology, procedure, or consult results
+
+[Current Status]
+- current clinical condition
+- active problems
+- pending plans
 
 
 ========================
@@ -1324,26 +1368,11 @@ Format:
 
 【Narrative Clinical Course】
 
-- DO NOT include pre-admission history
-- START DIRECTLY with hospitalization course
-
-- MUST follow this structure:
-
-During hospitalization, the clinical course was characterized by ...
-
-Subsequently, ...
-
-Overall, the patient's condition ...
-
-RULES:
-- Paragraph form
-- Logical and chronological
-- Highlight treatment → response → complications
-- No unnecessary background
-- Professional clinical English
-- Concise and smooth
+Write 1-3 coherent paragraphs.
+Start from the earlier inpatient course if Previous weekly summary exists.
+Then describe the current week's new assessment, lab trends, examination results, treatment response, complications, and current status.
+Keep chronology clear and concise.
 """
-
 DISCHARGE_PROMPT = """
 You are a clinical assistant generating discharge summaries.
 
@@ -1585,7 +1614,7 @@ def load_selected_case(username, case_id):
         patient_summary_md(case),
         s1["chief_complaint"], s1["admission_purpose"], s1["history_text"], s1.get("outpatient_notes", ""), s1.get("emergency_notes", ""), s1.get("consult_notes", ""), s1["labs"], s1.get("timeline_output", ""), s1.get("checklist_output", s1.get("output", "")),
         s2["chief_complaint"], s2["admission_purpose"], s2["history_text"], s2.get("outpatient_notes", ""), s2.get("emergency_notes", ""), s2.get("consult_notes", ""), s2.get("timeline_text", ""), s2["labs"], s2["additional_history"], s2["pe_findings"], s2["extra_data"], s2.get("admission_date", ""), s2.get("diagnosis", ""), s2["output"],
-        weekly["events"], weekly["previous_weekly"], weekly["output"],
+        weekly.get("week_range", ""), weekly.get("assessment", weekly.get("events", "")), weekly.get("lab", ""), weekly.get("exam_results", ""), weekly.get("previous_weekly", ""), weekly.get("output", ""),
         auto_discharge_weekly, discharge["final_events"], discharge["output"],
         auto_or_history, orb["meds"], orb["surgery"], orb["extra"], orb["output"],
         handoff.get("problem", ""), handoff.get("assessment", ""), handoff.get("plan", ""), handoff.get("output", ""),
@@ -1659,7 +1688,7 @@ def save_workspace(
     case_id,
     chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, checklist1,
     chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
-    weekly_events, weekly_prev, weekly_out,
+    weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev, weekly_out,
     discharge_weekly, discharge_events, discharge_out,
     or_history, or_meds, or_surgery, or_extra, or_out,
     handoff_problem, handoff_assessment, handoff_plan, handoff_out,
@@ -1702,7 +1731,10 @@ def save_workspace(
                 "output": output2,
             }),
             c["weekly"].update({
-                "events": weekly_events,
+                "week_range": weekly_week_range,
+                "assessment": weekly_assessment,
+                "lab": weekly_lab,
+                "exam_results": weekly_exam,
                 "previous_weekly": weekly_prev,
                 "output": weekly_out,
             }),
@@ -1923,11 +1955,20 @@ Plan:
     return result, patient_summary_md(updated)
 
 
-def weekly_summary(username, case_id, events, previous_weekly):
+def weekly_summary(username, case_id, week_range, assessment, lab, exam_results, previous_weekly):
     case = require_case(username, case_id)
     user_input = f"""
-Weekly events and timeline:
-{events}
+Week/date range:
+{week_range}
+
+Current week assessment:
+{assessment}
+
+Current week lab:
+{lab}
+
+Current week examination results:
+{exam_results}
 
 Previous weekly summary (if any):
 {previous_weekly}
@@ -1939,7 +1980,10 @@ Previous weekly summary (if any):
         case_id,
         lambda c: c["weekly"].update(
             {
-                "events": events,
+                "week_range": week_range,
+                "assessment": assessment,
+                "lab": lab,
+                "exam_results": exam_results,
                 "previous_weekly": previous_weekly,
                 "output": result,
             }
@@ -2041,6 +2085,7 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
         return (
             browser_payload,
             "",
+            "",
             current_user_md(""),
             gr.update(visible=True),
             gr.update(visible=False),
@@ -2064,6 +2109,7 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
     browser_payload = browser_payload or {"username": username, "session_token": ""}
     return (
         browser_payload,
+        username,
         username,
         current_user_md(username),
         gr.update(visible=False),
@@ -2117,6 +2163,7 @@ def logout_user(username: str, browser_payload: dict | None = None):
     return (
         {"username": "", "session_token": ""},
         "",
+        "",
         current_user_md(""),
         gr.update(visible=True),
         gr.update(visible=False),
@@ -2143,6 +2190,7 @@ def logout_user(username: str, browser_payload: dict | None = None):
 with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     browser_session = gr.BrowserState({"username": "", "session_token": ""}) if hasattr(gr, "BrowserState") else gr.State({"username": "", "session_token": ""})
     user_state = gr.State("")
+    workspace_user_state = gr.State("")
     selected_case_id = gr.State("")
 
     current_user_banner = gr.Markdown("### 尚未登入")
@@ -2270,14 +2318,17 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         handoff_out = gr.Textbox(label="交班摘要 Handoff Summary", lines=24)
 
                     with gr.Tab("Weekly Summary"):
-                        weekly_events = gr.Textbox(label="This week's events & timeline", lines=15)
-                        weekly_prev = gr.Textbox(label="Previous weekly summary (optional)", lines=10)
+                        weekly_week_range = gr.Textbox(label="本週時間範圍 / Week Date Range（建議填寫，例如 2026/04/08-2026/04/14）", lines=2)
+                        weekly_assessment = gr.Textbox(label="Assessment（本週病情評估 / clinical course / treatment response）", lines=8)
+                        weekly_lab = gr.Textbox(label="Lab（本週重要 lab / 趨勢）", lines=8)
+                        weekly_exam = gr.Textbox(label="檢查結果（影像 / pathology / procedure / consult result）", lines=8)
+                        weekly_prev = gr.Textbox(label="Previous weekly summary（保留；會被整合並適當精簡）", lines=10)
 
                         with gr.Row():
                             weekly_btn = gr.Button("Generate Weekly Summary")
                             weekly_clear = gr.Button("Clear")
 
-                        weekly_out = gr.Textbox(label="Weekly Summary", lines=25)
+                        weekly_out = gr.Textbox(label="Cumulative Weekly Summary", lines=25)
 
                     with gr.Tab("Discharge Note"):
                         discharge_weekly = gr.Textbox(label="All weekly summaries (optional)", lines=15)
@@ -2314,27 +2365,27 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     login_btn.click(
         login_user,
         inputs=[login_username, login_password, browser_session],
-        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
+        outputs=[browser_session, user_state, workspace_user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     login_password.submit(
         login_user,
         inputs=[login_username, login_password, browser_session],
-        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
+        outputs=[browser_session, user_state, workspace_user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     login_username.submit(
         login_user,
         inputs=[login_username, login_password, browser_session],
-        outputs=[browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
+        outputs=[browser_session, user_state, workspace_user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     logout_btn.click(
         logout_user,
         inputs=[user_state, browser_session],
         outputs=[
-            browser_session, user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview,
+            browser_session, user_state, workspace_user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview,
             selected_case_id, login_status, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
             chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
-            weekly_events, weekly_prev, weekly_out,
+            weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
             handoff_problem, handoff_assessment, handoff_plan, handoff_out,
@@ -2345,7 +2396,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     admin_load_btn.click(
         load_admin_user_data,
         inputs=[user_state, admin_user_selector],
-        outputs=[admin_user_summary, admin_user_json, admin_cases_json, admin_status],
+        outputs=[workspace_user_state, app_panel, case_selector, case_list_preview, selected_case_id, case_summary, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     admin_delete_btn.click(
         delete_registered_user,
@@ -2356,34 +2407,34 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     # Sidebar refresh / filter
     status_filter.change(
         refresh_sidebar_ui,
-        inputs=[user_state, status_filter, case_search, selected_case_id],
+        inputs=[workspace_user_state, status_filter, case_search, selected_case_id],
         outputs=[case_selector, case_list_preview, selected_case_id],
     )
     case_search.submit(
         refresh_sidebar_ui,
-        inputs=[user_state, status_filter, case_search, selected_case_id],
+        inputs=[workspace_user_state, status_filter, case_search, selected_case_id],
         outputs=[case_selector, case_list_preview, selected_case_id],
     )
     refresh_sidebar_btn.click(
         refresh_sidebar_ui,
-        inputs=[user_state, status_filter, case_search, selected_case_id],
+        inputs=[workspace_user_state, status_filter, case_search, selected_case_id],
         outputs=[case_selector, case_list_preview, selected_case_id],
     )
 
     create_case_btn.click(
         create_case,
-        inputs=[user_state, new_mrn, new_name, new_age, new_sex, status_filter, case_search],
+        inputs=[workspace_user_state, new_mrn, new_name, new_age, new_sex, status_filter, case_search],
         outputs=[case_selector, case_list_preview, selected_case_id, case_summary, new_mrn, new_name, new_age, new_sex, case_status_message],
     )
 
     load_case_btn.click(
         load_selected_case,
-        inputs=[user_state, case_selector],
+        inputs=[workspace_user_state, case_selector],
         outputs=[
             selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
             chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
-            weekly_events, weekly_prev, weekly_out,
+            weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
             handoff_problem, handoff_assessment, handoff_plan, handoff_out,
@@ -2392,12 +2443,12 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     )
     case_selector.change(
         load_selected_case,
-        inputs=[user_state, case_selector],
+        inputs=[workspace_user_state, case_selector],
         outputs=[
             selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
             chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
-            weekly_events, weekly_prev, weekly_out,
+            weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
             handoff_problem, handoff_assessment, handoff_plan, handoff_out,
@@ -2408,10 +2459,10 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     save_workspace_btn.click(
         save_workspace,
         inputs=[
-            user_state, selected_case_id,
+            workspace_user_state, selected_case_id,
             chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
             chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
-            weekly_events, weekly_prev, weekly_out,
+            weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
             handoff_problem, handoff_assessment, handoff_plan, handoff_out,
@@ -2420,12 +2471,12 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     )
     reload_workspace_btn.click(
         load_selected_case,
-        inputs=[user_state, selected_case_id],
+        inputs=[workspace_user_state, selected_case_id],
         outputs=[
             selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
             chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
-            weekly_events, weekly_prev, weekly_out,
+            weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
             handoff_problem, handoff_assessment, handoff_plan, handoff_out,
@@ -2435,22 +2486,22 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
 
     discharge_case_btn.click(
         move_case_to_archive,
-        inputs=[user_state, selected_case_id, status_filter, case_search],
+        inputs=[workspace_user_state, selected_case_id, status_filter, case_search],
         outputs=[case_selector, case_list_preview, selected_case_id, case_summary, case_status_message],
     )
     restore_case_btn.click(
         restore_case,
-        inputs=[user_state, selected_case_id, status_filter, case_search],
+        inputs=[workspace_user_state, selected_case_id, status_filter, case_search],
         outputs=[case_selector, case_list_preview, selected_case_id, case_summary, case_status_message],
     )
     delete_case_btn.click(
         delete_case,
-        inputs=[user_state, selected_case_id, status_filter, case_search],
+        inputs=[workspace_user_state, selected_case_id, status_filter, case_search],
         outputs=[
             case_selector, case_list_preview, selected_case_id, case_summary,
             chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1,
             chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2,
-            weekly_events, weekly_prev, weekly_out,
+            weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev, weekly_out,
             discharge_weekly, discharge_events, discharge_out,
             or_history, or_meds, or_surgery, or_extra, or_out,
             handoff_problem, handoff_assessment, handoff_plan, handoff_out,
@@ -2460,7 +2511,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
 
     btn1.click(
         admission_stage1,
-        inputs=[user_state, selected_case_id, chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1],
+        inputs=[workspace_user_state, selected_case_id, chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1],
         outputs=[timeline1, output1, case_summary],
     )
     btn1_clear.click(lambda: empty_stage1(), outputs=[chief1, purpose1, history1, outpatient1, emergency1, consult1, labs1, timeline1, output1])
@@ -2472,17 +2523,17 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     )
     btn2.click(
         admission_stage2,
-        inputs=[user_state, selected_case_id, chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2],
+        inputs=[workspace_user_state, selected_case_id, chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2],
         outputs=[output2, case_summary, or_history],
     )
     btn2_clear.click(lambda: empty_stage2(), outputs=[chief2, purpose2, history2, outpatient2, emergency2, consult2, timeline2, labs2, add_hist, pe2, extra2, admission_date2, diagnosis2, output2])
 
     weekly_btn.click(
         weekly_summary,
-        inputs=[user_state, selected_case_id, weekly_events, weekly_prev],
+        inputs=[workspace_user_state, selected_case_id, weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev],
         outputs=[weekly_out, case_summary, discharge_weekly],
     )
-    weekly_clear.click(lambda: empty_weekly(), outputs=[weekly_events, weekly_prev, weekly_out])
+    weekly_clear.click(lambda: empty_weekly(), outputs=[weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev, weekly_out])
 
     discharge_copy.click(copy_weekly_to_discharge, inputs=[weekly_out], outputs=[discharge_weekly])
     discharge_autofill.click(
@@ -2492,14 +2543,14 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     )
     discharge_btn.click(
         discharge_note,
-        inputs=[user_state, selected_case_id, discharge_weekly, discharge_events],
+        inputs=[workspace_user_state, selected_case_id, discharge_weekly, discharge_events],
         outputs=[discharge_out, case_summary],
     )
     discharge_clear.click(lambda: empty_discharge(), outputs=[discharge_weekly, discharge_events, discharge_out])
 
     handoff_btn.click(
         handoff_summary,
-        inputs=[user_state, selected_case_id, handoff_problem, handoff_assessment, handoff_plan],
+        inputs=[workspace_user_state, selected_case_id, handoff_problem, handoff_assessment, handoff_plan],
         outputs=[handoff_out, case_summary],
     )
     handoff_clear.click(lambda: empty_handoff(), outputs=[handoff_problem, handoff_assessment, handoff_plan, handoff_out])
@@ -2512,7 +2563,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     )
     or_btn.click(
         or_briefing,
-        inputs=[user_state, selected_case_id, or_history, or_meds, or_surgery, or_extra],
+        inputs=[workspace_user_state, selected_case_id, or_history, or_meds, or_surgery, or_extra],
         outputs=[or_out, case_summary],
     )
     or_clear.click(lambda: empty_or(), outputs=[or_history, or_meds, or_surgery, or_extra, or_out])
@@ -2534,4 +2585,3 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=port,
     )
-
