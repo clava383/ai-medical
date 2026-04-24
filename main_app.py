@@ -21,6 +21,7 @@ load_dotenv()
 APP_DATA_DIR = Path(os.environ.get("APP_DATA_DIR", "/tmp/ai-medical-data"))
 USERS_DB_PATH = APP_DATA_DIR / "users.json"
 SESSIONS_DB_PATH = APP_DATA_DIR / "sessions.json"
+ACTIVITY_LOG_PATH = APP_DATA_DIR / "activity_log.json"
 USER_DATA_DIR = APP_DATA_DIR / "users"
 
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,6 +31,8 @@ if not USERS_DB_PATH.exists():
     USERS_DB_PATH.write_text(json.dumps({"users": []}, ensure_ascii=False, indent=2), encoding="utf-8")
 if not SESSIONS_DB_PATH.exists():
     SESSIONS_DB_PATH.write_text(json.dumps({"sessions": []}, ensure_ascii=False, indent=2), encoding="utf-8")
+if not ACTIVITY_LOG_PATH.exists():
+    ACTIVITY_LOG_PATH.write_text(json.dumps({"activities": []}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # =========================================================
@@ -274,12 +277,58 @@ def save_sessions_db(db: dict) -> None:
     SESSIONS_DB_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_activity_db() -> dict:
+    try:
+        return json.loads(ACTIVITY_LOG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"activities": []}
+
+
+def save_activity_db(db: dict) -> None:
+    ACTIVITY_LOG_PATH.write_text(json.dumps(db, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def log_activity(username: str, action: str, detail: str = "") -> None:
+    username = (username or "").strip()
+    db = load_activity_db()
+    db.setdefault("activities", []).append({
+        "time": now_iso(),
+        "username": username,
+        "action": action,
+        "detail": detail,
+    })
+    db["activities"] = db.get("activities", [])[-1000:]
+    save_activity_db(db)
+
+
+def user_sessions(username: str = "") -> list[dict]:
+    db = load_sessions_db()
+    sessions = db.get("sessions", [])
+    if username:
+        sessions = [s for s in sessions if s.get("username") == username]
+    return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
+
+
+def user_activities(username: str = "", limit: int = 50) -> list[dict]:
+    db = load_activity_db()
+    acts = db.get("activities", [])
+    if username:
+        acts = [a for a in acts if a.get("username") == username]
+    return list(reversed(acts[-limit:]))
+
+
+def generate_temp_password(length: int = 10) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
 def create_session(username: str) -> str:
     token = secrets.token_urlsafe(32)
     db = load_sessions_db()
     db["sessions"] = [s for s in db.get("sessions", []) if s.get("username") != username]
     db.setdefault("sessions", []).append(
         {
+            "id": str(uuid.uuid4()),
             "username": username,
             "token": token,
             "created_at": now_iso(),
@@ -316,14 +365,28 @@ def delete_session(username: str, token: str = "") -> None:
 
 
 def hash_password(password: str, salt_hex: str | None = None) -> tuple[str, str]:
-    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
-    return salt.hex(), dk.hex()
+    # TEST VERSION ONLY: plaintext password storage.
+    # Keep this function name so old call sites remain compatible.
+    return "PLAINTEXT_TEST_MODE", password
 
 
-def verify_password(password: str, salt_hex: str, hash_hex: str) -> bool:
-    _, candidate = hash_password(password, salt_hex)
-    return secrets.compare_digest(candidate, hash_hex)
+def verify_password(password: str, salt_hex: str = "", hash_hex: str = "", plaintext_password: str = "") -> bool:
+    # New test-mode accounts store plaintext password in user["password"].
+    if plaintext_password:
+        return secrets.compare_digest(password, plaintext_password)
+
+    # Backward compatibility: older accounts may still have PBKDF2 hash + salt.
+    if salt_hex and hash_hex and salt_hex != "PLAINTEXT_TEST_MODE":
+        try:
+            salt = bytes.fromhex(salt_hex)
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
+            return secrets.compare_digest(dk.hex(), hash_hex)
+        except Exception:
+            return False
+
+    if hash_hex:
+        return secrets.compare_digest(password, hash_hex)
+    return False
 
 
 def get_user_record(username: str):
@@ -352,13 +415,17 @@ def register_user(username: str, password: str, confirm_password: str):
         {
             "id": str(uuid.uuid4()),
             "username": username,
+            "password": password,
             "password_salt": salt_hex,
             "password_hash": hash_hex,
+            "password_mode": "plaintext_test",
             "created_at": now_iso(),
+            "last_login_at": "",
         }
     )
     save_users_db(db)
     user_case_db_path(username)
+    log_activity(username, "register", "User registered")
     return f"註冊成功：{username}，現在可以登入。"
 
 
@@ -368,7 +435,7 @@ def authenticate_user(username: str, password: str) -> bool:
     user = get_user_record(username)
     if not user:
         return False
-    return verify_password(password, user["password_salt"], user["password_hash"])
+    return verify_password(password, user.get("password_salt", ""), user.get("password_hash", ""), user.get("password", ""))
 
 
 def admin_user_choices(keyword: str = ""):
@@ -409,28 +476,54 @@ def admin_case_choices(username: str, keyword: str = ""):
 
 def admin_account_md(username: str) -> str:
     if not username:
-        return "### 使用者帳號密碼\n\n_尚未選擇使用者。_"
+        return "### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_"
+
     user_record = get_user_record(username) or {}
     created_at = user_record.get("created_at", "")
-    password_hash = user_record.get("password_hash", "")
-    password_salt = user_record.get("password_salt", "")
+    last_login_at = user_record.get("last_login_at", "")
+    password = user_record.get("password", "")
+    sessions = user_sessions(username)
+    activities = user_activities(username, 30)
+
     lines = [
-        "### 使用者帳號密碼",
+        "### 帳號資訊",
         "",
         f"- **Username:** {username}",
-        f"- **Created:** {created_at}",
-        f"- **Password hash:** `{password_hash}`" if password_hash else "- **Password hash:** _無資料_",
-        f"- **Password salt:** `{password_salt}`" if password_salt else "- **Password salt:** _無資料_",
+        f"- **Created:** {created_at or '_無資料_'}",
+        f"- **Last login:** {last_login_at or '_尚無紀錄_'}",
+        f"- **Password 明文測試版:** `{password}`" if password else "- **Password 明文測試版:** _舊帳號尚無明文密碼，請用 Reset Password 建立新密碼_",
         "",
-        "> 目前系統不會保存可直接還原的明文密碼；後台只能看到登入帳號與已儲存的 password hash / salt。",
+        "> 測試版目前以明文儲存密碼；正式版請改回 hash + salt。",
+        "",
+        "### Active Login Sessions",
     ]
+
+    if sessions:
+        for sess in sessions:
+            token = sess.get("token", "")
+            token_preview = token[:8] + "..." if token else ""
+            lines.append(
+                f"- session `{sess.get('id','')}` · created {sess.get('created_at','')} · updated {sess.get('updated_at','')} · token {token_preview}"
+            )
+    else:
+        lines.append("- _目前沒有 active session_")
+
+    lines += ["", "### Activity Log"]
+    if activities:
+        for act in activities:
+            detail = act.get("detail", "")
+            detail_text = f" · {detail}" if detail else ""
+            lines.append(f"- {act.get('time','')} · **{act.get('action','')}**{detail_text}")
+    else:
+        lines.append("- _尚無活動紀錄_")
+
     return "\n".join(lines)
 
 
 def refresh_admin_user_search(current_username: str, keyword: str):
     if not is_admin_user(current_username):
         raise gr.Error("只有 admin 可以使用後台。")
-    return gr.update(choices=admin_user_choices(keyword), value=None), "### 使用者帳號密碼\n\n_尚未選擇使用者。_", "", "", ""
+    return gr.update(choices=admin_user_choices(keyword), value=None), "### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_", "", "", ""
 
 
 def summarize_user_workspace(username: str) -> str:
@@ -438,6 +531,97 @@ def summarize_user_workspace(username: str) -> str:
         return ""
     user_db = load_db(username)
     return json.dumps(user_db, ensure_ascii=False, indent=2)
+
+
+def admin_account_details_json(username: str) -> str:
+    if not username:
+        return ""
+    return json.dumps(
+        {
+            "user": get_user_record(username) or {},
+            "active_sessions": user_sessions(username),
+            "activity_log": user_activities(username, 100),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def set_user_plaintext_password(username: str, new_password: str) -> None:
+    username = sanitize_username(username)
+    new_password = (new_password or "").strip()
+    if len(new_password) < 6:
+        raise gr.Error("密碼至少需要 6 個字元。")
+
+    db = load_users_db()
+    found = False
+    for user in db.get("users", []):
+        if user.get("username") == username:
+            user["password"] = new_password
+            user["password_salt"] = "PLAINTEXT_TEST_MODE"
+            user["password_hash"] = new_password
+            user["password_mode"] = "plaintext_test"
+            user["password_updated_at"] = now_iso()
+            found = True
+            break
+
+    if not found:
+        # Allow creating an admin record in test mode if it does not exist in users.json.
+        if is_admin_user(username):
+            db.setdefault("users", []).append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "username": username,
+                    "password": new_password,
+                    "password_salt": "PLAINTEXT_TEST_MODE",
+                    "password_hash": new_password,
+                    "password_mode": "plaintext_test",
+                    "created_at": now_iso(),
+                    "last_login_at": "",
+                    "password_updated_at": now_iso(),
+                }
+            )
+        else:
+            raise gr.Error("找不到這個帳號。")
+
+    save_users_db(db)
+
+
+def change_password(username: str, old_password: str, new_password: str, confirm_password: str):
+    username = require_user(username)
+    old_password = (old_password or "").strip()
+    new_password = (new_password or "").strip()
+    confirm_password = (confirm_password or "").strip()
+
+    if not authenticate_admin(username, old_password) and not authenticate_user(username, old_password):
+        raise gr.Error("目前密碼不正確。")
+    if len(new_password) < 6:
+        raise gr.Error("新密碼至少需要 6 個字元。")
+    if new_password != confirm_password:
+        raise gr.Error("兩次輸入的新密碼不一致。")
+
+    set_user_plaintext_password(username, new_password)
+    log_activity(username, "change_password", "Password changed by user")
+    return "密碼已更新。", "", "", ""
+
+
+def admin_reset_password(current_username: str, target_username: str):
+    if not is_admin_user(current_username):
+        raise gr.Error("只有 admin 可以 reset 密碼。")
+    target_username = (target_username or "").strip()
+    if not target_username:
+        raise gr.Error("請先選擇使用者。")
+
+    new_pw = generate_temp_password(10)
+    set_user_plaintext_password(target_username, new_pw)
+    delete_session(target_username)
+    log_activity(target_username, "admin_reset_password", f"Password reset by {current_username}")
+    return (
+        admin_account_md(target_username),
+        admin_account_details_json(target_username),
+        admin_account_details_json(target_username),
+        f"已 reset {target_username} 密碼。新密碼：{new_pw}",
+    )
 
 
 def load_admin_user_data(current_username: str, target_username: str):
@@ -451,7 +635,7 @@ def load_admin_user_data(current_username: str, target_username: str):
             "### Cases\n\n_尚未選擇使用者。_",
             None,
             "### No case selected\n請先選擇使用者。",
-            "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
+            "### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_",
             "",
             "",
             "尚未選擇使用者。",
@@ -466,9 +650,9 @@ def load_admin_user_data(current_username: str, target_username: str):
         selected_case_id,
         f"### Admin viewing Clinical AI Workspace\n目前正在查看使用者：**{target_username}**\n\n請從左側病人列表選擇 case，即可像一般 workspace 一樣查看輸入與輸出。",
         admin_account_md(target_username),
-        summarize_user_workspace(target_username),
-        summarize_user_workspace(target_username),
-        f"已載入使用者資料與 Clinical AI Workspace：{target_username}",
+        admin_account_details_json(target_username),
+        admin_account_details_json(target_username),
+        f"已載入帳號資訊與登入紀錄：{target_username}",
     )
 
 
@@ -495,7 +679,7 @@ def delete_registered_user(current_username: str, target_username: str):
 
     return (
         gr.update(choices=admin_user_choices(), value=None),
-        "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
+        "### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_",
         "",
         "",
         f"已刪除帳號：{target_username}",
@@ -1011,7 +1195,21 @@ def is_admin_user(username: str) -> bool:
 def authenticate_admin(username: str, password: str) -> bool:
     admin_username = (os.environ.get("CLINICAL_ADMIN_USERNAME", "admin") or "").strip()
     admin_password = os.environ.get("CLINICAL_ADMIN_PASSWORD", "admin123")
-    return bool(username) and username == admin_username and (password or "").strip() == admin_password
+    username = (username or "").strip()
+    password = (password or "").strip()
+
+    if not username or username != admin_username:
+        return False
+
+    # Env password remains valid. If an admin user record exists, its plaintext password is also valid.
+    if password == admin_password:
+        return True
+
+    user = get_user_record(username)
+    if user:
+        return verify_password(password, user.get("password_salt", ""), user.get("password_hash", ""), user.get("password", ""))
+
+    return False
 
 
 def current_user_md(username: str) -> str:
@@ -2097,7 +2295,7 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
             "",
             gr.update(visible=False),
             gr.update(choices=[], value=None),
-            "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
+            "### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_",
             "",
             "",
             "",
@@ -2113,7 +2311,7 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
         username,
         current_user_md(username),
         gr.update(visible=False),
-        gr.update(visible=True),
+        gr.update(visible=not admin_visible),
         sidebar_dropdown,
         sidebar_md,
         selected_case_id,
@@ -2122,7 +2320,7 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
         "",
         gr.update(visible=admin_visible),
         gr.update(choices=admin_choices, value=None),
-        "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
+        "### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_",
         "",
         "",
         "",
@@ -2136,7 +2334,15 @@ def login_user(username: str, password: str, browser_payload: dict | None = None
     if not ok:
         return build_login_response("", "登入失敗，請確認 username / password。", {"username": "", "session_token": ""})
 
+    db = load_users_db()
+    for user in db.get("users", []):
+        if user.get("username") == username:
+            user["last_login_at"] = now_iso()
+            break
+    save_users_db(db)
+
     token = create_session(username)
+    log_activity(username, "login", "Login successful")
     return build_login_response(username, f"登入成功：{username}", {"username": username, "session_token": token})
 
 
@@ -2160,6 +2366,8 @@ def register_user_ui(username: str, password: str, confirm_password: str):
 def logout_user(username: str, browser_payload: dict | None = None):
     browser_payload = browser_payload or {}
     delete_session(username, browser_payload.get("session_token", ""))
+    if username:
+        log_activity(username, "logout", "User logged out")
     return (
         {"username": "", "session_token": ""},
         "",
@@ -2180,7 +2388,7 @@ def logout_user(username: str, browser_payload: dict | None = None):
         *empty_handoff(),
         gr.update(visible=False),
         gr.update(choices=[], value=None),
-        "### 使用者帳號密碼\n\n_尚未選擇使用者。_",
+        "### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_",
         "",
         "",
         "",
@@ -2196,16 +2404,17 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     current_user_banner = gr.Markdown("### 尚未登入")
     login_status = gr.Markdown("")
     with gr.Column(visible=False) as admin_panel:
-        gr.Markdown("## Admin 後台 v4")
+        gr.Markdown("## Admin 後台 v7（帳號管理測試版）")
         admin_user_search = gr.Textbox(label="搜尋帳號", placeholder="輸入 username")
         admin_user_selector = gr.Dropdown(label="選擇使用者", choices=[], value=None)
         with gr.Row():
-            admin_load_btn = gr.Button("載入使用者資料")
+            admin_load_btn = gr.Button("載入帳號資訊")
+            admin_reset_btn = gr.Button("Reset Password")
             admin_delete_btn = gr.Button("刪除已註冊帳號", variant="stop")
-        admin_user_summary = gr.Markdown("### 使用者帳號密碼\n\n_尚未選擇使用者。_")
-        admin_user_json = gr.Textbox(label="Workspace（該帳號所有 case / 輸入輸出）", lines=28)
-        admin_cases_json = gr.Textbox(label="Workspace 備份檢視", lines=28, visible=False)
-        gr.Markdown("後台只顯示使用者帳號資料與該帳號的 workspace，不提供新增 case。")
+        admin_user_summary = gr.Markdown("### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_")
+        admin_user_json = gr.Textbox(label="帳號 / active sessions / activity log（JSON 備份檢視）", lines=18)
+        admin_cases_json = gr.Textbox(label="備份檢視", lines=18, visible=False)
+        gr.Markdown("測試版：密碼以明文儲存；正式版請改回 hash + salt。選擇使用者後也可以載入 Clinical AI Workspace 查看 case。")
         admin_status = gr.Markdown("")
 
 
@@ -2243,6 +2452,12 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                 )
                 load_case_btn = gr.Button("Load Selected Case", variant="primary")
                 logout_btn = gr.Button("Logout")
+                with gr.Accordion("更改密碼 / Change Password", open=False):
+                    old_password_box = gr.Textbox(label="目前密碼", type="password")
+                    new_password_box = gr.Textbox(label="新密碼", type="password")
+                    confirm_new_password_box = gr.Textbox(label="確認新密碼", type="password")
+                    change_password_btn = gr.Button("Update Password")
+                    change_password_status = gr.Markdown("")
                 case_list_preview = gr.Markdown("### Cases\n\n_請先登入._")
 
                 with gr.Accordion("新增病人 / Create Case", open=False):
@@ -2393,10 +2608,21 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         ],
     )
 
+    change_password_btn.click(
+        change_password,
+        inputs=[user_state, old_password_box, new_password_box, confirm_new_password_box],
+        outputs=[change_password_status, old_password_box, new_password_box, confirm_new_password_box],
+    )
+
     admin_load_btn.click(
         load_admin_user_data,
         inputs=[user_state, admin_user_selector],
         outputs=[workspace_user_state, app_panel, case_selector, case_list_preview, selected_case_id, case_summary, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
+    )
+    admin_reset_btn.click(
+        admin_reset_password,
+        inputs=[user_state, admin_user_selector],
+        outputs=[admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
     admin_delete_btn.click(
         delete_registered_user,
