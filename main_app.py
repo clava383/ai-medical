@@ -119,7 +119,7 @@ def sort_timeline_text(timeline_text: str) -> str:
 def build_timeline_source_text(history_text: str, outpatient_notes: str, emergency_notes: str, consult_notes: str, additional_history: str = "", extra_recent_history: str = "") -> str:
     sections = [
         ("Known history / previous admission records (background; NOT this admission unless explicitly dated)", history_text),
-        ("Outpatient notes / OPD record", outpatient_notes),
+        ("Outpatient notes / OPD record (must preserve visit date and outpatient physician if provided)", outpatient_notes),
         ("Emergency department notes / ER record", emergency_notes),
         ("Consultation notes (must preserve consultation date/time and specialty)", consult_notes),
         ("Additional history obtained", additional_history),
@@ -1309,6 +1309,7 @@ STRICT RULES:
 - Timeline must be based ONLY on provided information
 - Known history usually contains previous admission records or past hospitalization data; treat it as background history, not the current admission, unless it clearly contains dates/events relevant to this admission.
 - Timeline MUST integrate all input fields: previous admission records/background history, OPD notes, ER notes, consultation notes, labs/imaging, and admission purpose when relevant
+- Outpatient notes may include visit dates and outpatient physicians. If present, preserve the visit date and physician name/surname in the timeline.
 - Timeline MUST be sorted chronologically: earliest event at the top, most recent event at the bottom
 - Emergency department notes and consultation notes should be incorporated when provided
 - Consultation notes may contain multiple consults. For each consult, preserve the consultation date/time and specialty/department when available, and sort consult events chronologically.
@@ -1364,6 +1365,8 @@ STRICT RULES:
 - Follow EXACT formatting rules
 - Known history usually contains previous admission records or past hospitalization data; treat it as background history, not the current admission, unless explicitly dated and relevant to this admission.
 - Outpatient notes, emergency notes, consultation notes, Stage 1 timeline, and extra recent pre-admission history are supporting materials and should be integrated when relevant
+- Outpatient notes may contain a clinic visit date and outpatient physician. When provided, the Present illness MUST include the outpatient visit information in the appropriate chronological location, including date and physician. A natural sentence such as "The patient visited Dr. [English surname]'s outpatient department on YYYY/MM/DD" is acceptable, but exact wording is flexible.
+- If the physician name is in Chinese, convert the physician's surname to common English romanization when obvious; if uncertain, keep the original name rather than hallucinating.
 - The diagnosis wording at the beginning of Present illness is the SINGLE source of truth for the later Tentative Diagnosis and Assessment sections
 - Any diagnosis copied later MUST keep EXACT same wording, spelling, punctuation, order, and disease naming
 - You may only separate diagnoses into Actives and Underlyings; do NOT rename, merge, split, expand, or shorten them
@@ -1382,6 +1385,8 @@ CRITICAL DIAGNOSIS TEMPLATE RULES
 CRITICAL PRESENT ILLNESS WRITING RULES
 - Present illness should read like a coherent clinical story, not a bullet-point timeline.
 - Integrate all source material chronologically: prior hospitalization/background known history, outpatient notes, emergency notes, consultation notes, Stage 1 timeline, additional history, and extra recent pre-admission history.
+- For each clinically relevant OPD/outpatient record, preserve and write the visit date and outpatient physician/doctor when provided. Place it according to the actual visit date.
+- If multiple OPD visits are provided, include all clinically relevant visits in chronological order; remote/less relevant visits may be summarized briefly but should not lose date + physician information when it is provided.
 - The chronology must go from remote/earliest events to recent/current events.
 - Do NOT make the previous admission record sound like the current admission. If Known history describes a prior hospitalization, summarize it briefly as previous admission history/background.
 - Extra recent pre-admission history MUST be placed according to its actual date/time if date/time is provided. Do not force it to the end if its date is earlier than another event.
@@ -2022,7 +2027,7 @@ Admission purpose: {admission_purpose}
 Known history / previous admission records (background; usually NOT this admission):
 {history_text}
 
-Outpatient notes / OPD record:
+Outpatient notes / OPD record (preserve visit date and outpatient physician/doctor if provided):
 {outpatient_notes}
 
 Emergency department notes / ER record:
@@ -2099,7 +2104,7 @@ Admission date provided by user:
 Known history / previous admission records (background; usually NOT this admission):
 {history_text}
 
-Outpatient notes / OPD record:
+Outpatient notes / OPD record (preserve visit date and outpatient physician/doctor if provided):
 {outpatient_notes}
 
 Emergency department notes / ER record:
@@ -2530,7 +2535,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                             chief1 = gr.Textbox(label="Chief Complaint")
                             purpose1 = gr.Textbox(label="Admission Purpose")
                         history1 = gr.Textbox(label="Known History / Previous Admission Records（上次住院/過去資料，中英皆可）", lines=10)
-                        outpatient1 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
+                        outpatient1 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄：請含日期與門診醫師）", lines=6)
                         emergency1 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
                         consult1 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄：請含時間與科別，可多筆）", lines=6)
                         labs1 = gr.Textbox(label="Labs / Imaging (brief)", lines=5)
@@ -2548,7 +2553,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                             chief2 = gr.Textbox(label="Chief Complaint")
                             purpose2 = gr.Textbox(label="Admission Purpose")
                         history2 = gr.Textbox(label="Known History / Previous Admission Records（上次住院/過去資料）", lines=10)
-                        outpatient2 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
+                        outpatient2 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄：請含日期與門診醫師）", lines=6)
                         emergency2 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
                         consult2 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄：請含時間與科別，可多筆）", lines=6)
                         timeline2 = gr.Textbox(label="Current History Timeline", lines=6)
