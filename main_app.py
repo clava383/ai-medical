@@ -23,6 +23,7 @@ USERS_DB_PATH = APP_DATA_DIR / "users.json"
 SESSIONS_DB_PATH = APP_DATA_DIR / "sessions.json"
 ACTIVITY_LOG_PATH = APP_DATA_DIR / "activity_log.json"
 USER_DATA_DIR = APP_DATA_DIR / "users"
+SESSION_EXPIRE_HOURS = int(os.environ.get("SESSION_EXPIRE_HOURS", "720"))  # keep login unless browser is closed; default 30 days
 
 APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -117,12 +118,12 @@ def sort_timeline_text(timeline_text: str) -> str:
 
 def build_timeline_source_text(history_text: str, outpatient_notes: str, emergency_notes: str, consult_notes: str, additional_history: str = "", extra_recent_history: str = "") -> str:
     sections = [
-        ("Known history / Previous notes", history_text),
+        ("Known history / previous admission records (background; NOT this admission unless explicitly dated)", history_text),
         ("Outpatient notes / OPD record", outpatient_notes),
         ("Emergency department notes / ER record", emergency_notes),
-        ("Consultation notes", consult_notes),
+        ("Consultation notes (must preserve consultation date/time and specialty)", consult_notes),
         ("Additional history obtained", additional_history),
-        ("Extra recent pre-admission history", extra_recent_history),
+        ("Extra recent pre-admission history (must preserve dates and integrate chronologically)", extra_recent_history),
     ]
     parts = []
     for title, body in sections:
@@ -363,11 +364,30 @@ def validate_session(username: str, token: str) -> bool:
     if not username or not token:
         return False
     db = load_sessions_db()
+    changed = False
+    now = datetime.now()
+    kept_sessions = []
+    for session in db.get("sessions", []):
+        updated_at = session.get("updated_at") or session.get("created_at") or ""
+        expired = False
+        try:
+            if SESSION_EXPIRE_HOURS > 0 and updated_at:
+                expired = (now - datetime.fromisoformat(updated_at)) > timedelta(hours=SESSION_EXPIRE_HOURS)
+        except Exception:
+            expired = False
+        if expired:
+            changed = True
+            continue
+        kept_sessions.append(session)
+
+    db["sessions"] = kept_sessions
     for session in db.get("sessions", []):
         if session.get("username") == username and secrets.compare_digest(session.get("token", ""), token):
             session["updated_at"] = now_iso()
             save_sessions_db(db)
             return True
+    if changed:
+        save_sessions_db(db)
     return False
 
 
@@ -1287,9 +1307,11 @@ STRICT RULES:
 - Output should be easy for a PGY to use during bedside history taking
 - Do NOT write long paragraphs
 - Timeline must be based ONLY on provided information
-- Timeline MUST integrate all input fields: known history, OPD notes, ER notes, consultation notes, labs/imaging, and admission purpose when relevant
+- Known history usually contains previous admission records or past hospitalization data; treat it as background history, not the current admission, unless it clearly contains dates/events relevant to this admission.
+- Timeline MUST integrate all input fields: previous admission records/background history, OPD notes, ER notes, consultation notes, labs/imaging, and admission purpose when relevant
 - Timeline MUST be sorted chronologically: earliest event at the top, most recent event at the bottom
 - Emergency department notes and consultation notes should be incorporated when provided
+- Consultation notes may contain multiple consults. For each consult, preserve the consultation date/time and specialty/department when available, and sort consult events chronologically.
 - If exact date is unavailable, use approximate wording such as "previously", "recently", "on admission"
 - For the checklist, you MUST actively check whether the provided information already includes the following domains:
   past history, family history, surgical history, medication history, allergy history, smoking/alcohol/betel nut history, Chinese herbs or health supplements, TOCC if fever or suspected infection is mentioned
@@ -1340,6 +1362,7 @@ STRICT RULES:
 - DO NOT fabricate physical exam or lab
 - Use formal clinical English
 - Follow EXACT formatting rules
+- Known history usually contains previous admission records or past hospitalization data; treat it as background history, not the current admission, unless explicitly dated and relevant to this admission.
 - Outpatient notes, emergency notes, consultation notes, Stage 1 timeline, and extra recent pre-admission history are supporting materials and should be integrated when relevant
 - The diagnosis wording at the beginning of Present illness is the SINGLE source of truth for the later Tentative Diagnosis and Assessment sections
 - Any diagnosis copied later MUST keep EXACT same wording, spelling, punctuation, order, and disease naming
@@ -1358,8 +1381,12 @@ CRITICAL DIAGNOSIS TEMPLATE RULES
 
 CRITICAL PRESENT ILLNESS WRITING RULES
 - Present illness should read like a coherent clinical story, not a bullet-point timeline.
-- Integrate all source material chronologically: known history, outpatient notes, emergency notes, consultation notes, Stage 1 timeline, additional history, and extra recent pre-admission history.
+- Integrate all source material chronologically: prior hospitalization/background known history, outpatient notes, emergency notes, consultation notes, Stage 1 timeline, additional history, and extra recent pre-admission history.
 - The chronology must go from remote/earliest events to recent/current events.
+- Do NOT make the previous admission record sound like the current admission. If Known history describes a prior hospitalization, summarize it briefly as previous admission history/background.
+- Extra recent pre-admission history MUST be placed according to its actual date/time if date/time is provided. Do not force it to the end if its date is earlier than another event.
+- Consultation notes may include multiple consult records; each consult must be included when clinically relevant, with the consultation date/time and consulted specialty/department preserved when available.
+- Consultation records must be integrated in chronological order with the rest of the Present illness, not grouped randomly.
 - Extra recent pre-admission history should be integrated into the LATE PART of Present illness because it represents events closest to this admission.
 - Integrate all available timeline information into one flowing narrative paragraph or short paragraphs.
 - More recent events should be described in greater detail.
@@ -1992,7 +2019,7 @@ Chief complaint: {chief_complaint}
 
 Admission purpose: {admission_purpose}
 
-Known history:
+Known history / previous admission records (background; usually NOT this admission):
 {history_text}
 
 Outpatient notes / OPD record:
@@ -2001,7 +2028,7 @@ Outpatient notes / OPD record:
 Emergency department notes / ER record:
 {emergency_notes}
 
-Consultation notes / Consult record:
+Consultation notes / Consult record (include date/time and specialty; may contain multiple consults):
 {consult_notes}
 
 All timeline source material to integrate and sort chronologically:
@@ -2069,7 +2096,7 @@ Admission purpose: {admission_purpose}
 Admission date provided by user:
 {admission_date}
 
-Known history:
+Known history / previous admission records (background; usually NOT this admission):
 {history_text}
 
 Outpatient notes / OPD record:
@@ -2078,7 +2105,7 @@ Outpatient notes / OPD record:
 Emergency department notes / ER record:
 {emergency_notes}
 
-Consultation notes / Consult record:
+Consultation notes / Consult record (include date/time and specialty; may contain multiple consults):
 {consult_notes}
 
 Current history timeline generated in Stage 1:
@@ -2096,7 +2123,7 @@ Additional history obtained:
 Physical examination findings:
 {pe_findings}
 
-Extra recent pre-admission history:
+Extra recent pre-admission history (preserve date/time and integrate chronologically):
 {extra_data}
 
 Manual diagnosis seed / editable diagnosis:
@@ -2422,7 +2449,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     current_user_banner = gr.Markdown("### 尚未登入")
     login_status = gr.Markdown("")
     with gr.Column(visible=False) as admin_panel:
-        gr.Markdown("## Admin 後台 v7.1（帳號管理測試版）")
+        gr.Markdown("## Admin 後台 v7.2（帳號管理測試版）")
         admin_user_search = gr.Textbox(label="搜尋帳號", placeholder="輸入 username")
         admin_user_selector = gr.Dropdown(label="選擇使用者", choices=[], value=None)
         with gr.Row():
@@ -2502,10 +2529,10 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         with gr.Row():
                             chief1 = gr.Textbox(label="Chief Complaint")
                             purpose1 = gr.Textbox(label="Admission Purpose")
-                        history1 = gr.Textbox(label="Known History / Previous Notes (中英皆可)", lines=10)
+                        history1 = gr.Textbox(label="Known History / Previous Admission Records（上次住院/過去資料，中英皆可）", lines=10)
                         outpatient1 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
                         emergency1 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
-                        consult1 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄）", lines=6)
+                        consult1 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄：請含時間與科別，可多筆）", lines=6)
                         labs1 = gr.Textbox(label="Labs / Imaging (brief)", lines=5)
 
                         with gr.Row():
@@ -2520,15 +2547,15 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         with gr.Row():
                             chief2 = gr.Textbox(label="Chief Complaint")
                             purpose2 = gr.Textbox(label="Admission Purpose")
-                        history2 = gr.Textbox(label="Known History / Previous Notes", lines=10)
+                        history2 = gr.Textbox(label="Known History / Previous Admission Records（上次住院/過去資料）", lines=10)
                         outpatient2 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄）", lines=6)
                         emergency2 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
-                        consult2 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄）", lines=6)
+                        consult2 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄：請含時間與科別，可多筆）", lines=6)
                         timeline2 = gr.Textbox(label="Current History Timeline", lines=6)
                         labs2 = gr.Textbox(label="Labs / Imaging", lines=5)
                         add_hist = gr.Textbox(label="Additional History Obtained", lines=5)
                         pe2 = gr.Textbox(label="Physical Examination Findings", lines=5)
-                        extra2 = gr.Textbox(label="額外病史（住院前近期病史）", lines=5)
+                        extra2 = gr.Textbox(label="額外病史（住院前近期病史；若有時間會依時間寫入）", lines=5)
                         admission_date2 = gr.Textbox(label="Admission Date（入院日期，建議 YYYY/MM/DD）", lines=2)
                         diagnosis2 = gr.Textbox(label="Diagnosis（可手動輸入；可用 [Actives]/[Underlyings] 分段；不會自動加 #）", lines=5)
 
@@ -2816,6 +2843,12 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         refresh_admin_user_search,
         inputs=[user_state, admin_user_search],
         outputs=[admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
+    )
+
+    demo.load(
+        restore_browser_session,
+        inputs=[browser_session],
+        outputs=[browser_session, user_state, workspace_user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
 
 if __name__ == "__main__":
