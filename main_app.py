@@ -979,58 +979,53 @@ def is_treatment_or_detail_line(line: str) -> bool:
 
 
 def parse_manual_diagnosis_text(diagnosis_text: str) -> tuple[str, str, str]:
-    lines = [ln.rstrip() for ln in (diagnosis_text or "").splitlines() if ln.strip()]
-    if not lines:
+    """Manual diagnosis is treated as physician-curated source of truth.
+
+    Rules for this version:
+    - Preserve the user's wording and prefixes exactly, including "#.".
+    - Do not add, remove, or normalize diagnosis numbering.
+    - If [Actives]/[Underlyings] headers are provided, split by those headers.
+    - If no headers are provided, put the whole manual diagnosis block into Actives.
+    - For Plan headers, only remove leading "#." or "#" because the plan section should not
+      use numbered diagnosis prefixes, but the diagnosis text itself remains unchanged elsewhere.
+    """
+    raw = (diagnosis_text or "").strip()
+    if not raw:
         return "", "", ""
 
     active_lines: list[str] = []
     underlying_lines: list[str] = []
     current = "active"
+    saw_group_header = False
 
-    def target_list():
-        return underlying_lines if current == "underlying" else active_lines
-
-    for line in lines:
+    for line in raw.splitlines():
         stripped = line.strip()
+        if not stripped:
+            continue
         lowered = stripped.lower()
         if stripped.startswith("[") and "active" in lowered:
             current = "active"
+            saw_group_header = True
             continue
         if stripped.startswith("[") and ("underlying" in lowered or "past" in lowered):
             current = "underlying"
+            saw_group_header = True
             continue
 
-        target = target_list()
-        # Do NOT add # automatically. Lines starting with '-' or 'status post' are treated as
-        # treatment/detail lines under the preceding diagnosis, not as new diagnoses.
-        if is_treatment_or_detail_line(stripped):
-            if target:
-                target.append(stripped)
-            continue
+        if current == "underlying":
+            underlying_lines.append(stripped)
+        else:
+            active_lines.append(stripped)
 
-        target.append(stripped)
-
-    if not active_lines and underlying_lines:
-        active_lines, underlying_lines = underlying_lines, []
-
-    def dedupe_preserve_order(items: list[str]) -> list[str]:
-        seen = set()
-        out = []
-        for item in items:
-            key = normalize_dx_line(item)
-            if key not in seen:
-                out.append(item)
-                seen.add(key)
-        return out
-
-    active_lines = dedupe_preserve_order(active_lines)
-    underlying_lines = dedupe_preserve_order(underlying_lines)
+    if not saw_group_header:
+        # No manual grouping: keep exactly what the user entered as active diagnoses.
+        active_lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        underlying_lines = []
 
     active_text = "\n".join(active_lines) if active_lines else "UNKNOWN"
     underlying_text = "\n".join(underlying_lines) if underlying_lines else "UNKNOWN"
     plan_text = build_plan_active_titles(active_text) if active_text != "UNKNOWN" else "UNKNOWN"
     return active_text, underlying_text, plan_text
-
 
 def extract_plan_title_from_dx_line(line: str) -> str:
     stripped = (line or "").strip()
@@ -1309,7 +1304,7 @@ STRICT RULES:
 - Timeline must be based ONLY on provided information
 - Known history usually contains previous admission records or past hospitalization data; treat it as background history, not the current admission, unless it clearly contains dates/events relevant to this admission.
 - Timeline MUST integrate all input fields: previous admission records/background history, OPD notes, ER notes, consultation notes, labs/imaging, and admission purpose when relevant
-- Outpatient notes may include visit dates and outpatient physicians. If present, preserve the visit date and physician name/surname in the timeline.
+- Outpatient notes may include multiple visit dates and outpatient physicians. If present, preserve EVERY dated OPD visit with its visit date and physician name/surname in the timeline, sorted chronologically.
 - Timeline MUST be sorted chronologically: earliest event at the top, most recent event at the bottom
 - Emergency department notes and consultation notes should be incorporated when provided
 - Consultation notes may contain multiple consults. For each consult, preserve the consultation date/time and specialty/department when available, and sort consult events chronologically.
@@ -1365,7 +1360,7 @@ STRICT RULES:
 - Follow EXACT formatting rules
 - Known history usually contains previous admission records or past hospitalization data; treat it as background history, not the current admission, unless explicitly dated and relevant to this admission.
 - Outpatient notes, emergency notes, consultation notes, Stage 1 timeline, and extra recent pre-admission history are supporting materials and should be integrated when relevant
-- Outpatient notes may contain a clinic visit date and outpatient physician. When provided, the Present illness MUST include the outpatient visit information in the appropriate chronological location, including date and physician. A natural sentence such as "The patient visited Dr. [English surname]'s outpatient department on YYYY/MM/DD" is acceptable, but exact wording is flexible.
+- Outpatient notes may contain one or multiple clinic visits, each with visit date and outpatient physician. When provided, the Present illness MUST include EVERY OPD visit that has a date, in the appropriate chronological location, including the date and physician. A natural sentence such as "The patient visited Dr. [English surname]'s outpatient department on YYYY/MM/DD" is acceptable, but exact wording is flexible.
 - If the physician name is in Chinese, convert the physician's surname to common English romanization when obvious; if uncertain, keep the original name rather than hallucinating.
 - The diagnosis wording at the beginning of Present illness is the SINGLE source of truth for the later Tentative Diagnosis and Assessment sections
 - Any diagnosis copied later MUST keep EXACT same wording, spelling, punctuation, order, and disease naming
@@ -1373,7 +1368,7 @@ STRICT RULES:
 
 CRITICAL DIAGNOSIS TEMPLATE RULES
 - You will be given TWO blocks named [FORCED ACTIVE DIAGNOSES] and [FORCED UNDERLYING DIAGNOSES].
-- You MUST use these blocks exactly as the diagnosis lines shown at the start of Present illness.
+- You MUST use these blocks exactly as the diagnosis lines shown at the start of Present illness, preserving all #. prefixes if present.
 - Do NOT show the literal text [Diagnosis Seed] anywhere in the output.
 - If the same diagnosis appears in both active and underlying groups, keep it ONLY in Actives and do NOT repeat it in Underlyings.
 - For ACTIVE diagnoses, only keep the diagnosis line and MAJOR treatments/procedures if provided.
@@ -1386,7 +1381,7 @@ CRITICAL PRESENT ILLNESS WRITING RULES
 - Present illness should read like a coherent clinical story, not a bullet-point timeline.
 - Integrate all source material chronologically: prior hospitalization/background known history, outpatient notes, emergency notes, consultation notes, Stage 1 timeline, additional history, and extra recent pre-admission history.
 - For each clinically relevant OPD/outpatient record, preserve and write the visit date and outpatient physician/doctor when provided. Place it according to the actual visit date.
-- If multiple OPD visits are provided, include all clinically relevant visits in chronological order; remote/less relevant visits may be summarized briefly but should not lose date + physician information when it is provided.
+- If multiple OPD visits are provided, ALL OPD visits with dates MUST be included in chronological order. Preserve each visit date and outpatient physician/doctor when provided. Do NOT omit dated OPD visits simply because they appear repetitive; summarize content briefly if needed, but keep date + physician information.
 - The chronology must go from remote/earliest events to recent/current events.
 - Do NOT make the previous admission record sound like the current admission. If Known history describes a prior hospitalization, summarize it briefly as previous admission history/background.
 - Extra recent pre-admission history MUST be placed according to its actual date/time if date/time is provided. Do not force it to the end if its date is earlier than another event.
@@ -1424,7 +1419,7 @@ FORMAT REQUIREMENTS
 "This is a XX-year-old man/woman with the following underlying diseases:"
 - Immediately after the above sentence, list the diagnoses in TWO groups using the exact format below.
 - Use diagnosis lines EXACTLY as provided in [FORCED ACTIVE DIAGNOSES] and [FORCED UNDERLYING DIAGNOSES].
-- Do NOT add # or #. if the provided diagnosis line does not already have it.
+- Diagnosis is manually curated by the user. Preserve each diagnosis line EXACTLY as provided, including leading #. if present. Do NOT add, remove, renumber, or modify #/#. prefixes.
 - Lines beginning with '-' or 'status post' are treatment/procedure details under the preceding diagnosis and must NOT be treated as separate diagnoses.
 
 [Actives]
@@ -2454,7 +2449,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     current_user_banner = gr.Markdown("### 尚未登入")
     login_status = gr.Markdown("")
     with gr.Column(visible=False) as admin_panel:
-        gr.Markdown("## Admin 後台 v7.2（帳號管理測試版）")
+        gr.Markdown("## Admin 後台 v8（帳號管理測試版）")
         admin_user_search = gr.Textbox(label="搜尋帳號", placeholder="輸入 username")
         admin_user_selector = gr.Dropdown(label="選擇使用者", choices=[], value=None)
         with gr.Row():
@@ -2562,7 +2557,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         pe2 = gr.Textbox(label="Physical Examination Findings", lines=5)
                         extra2 = gr.Textbox(label="額外病史（住院前近期病史；若有時間會依時間寫入）", lines=5)
                         admission_date2 = gr.Textbox(label="Admission Date（入院日期，建議 YYYY/MM/DD）", lines=2)
-                        diagnosis2 = gr.Textbox(label="Diagnosis（可手動輸入；可用 [Actives]/[Underlyings] 分段；不會自動加 #）", lines=5)
+                        diagnosis2 = gr.Textbox(label="Diagnosis（可手動輸入；可用 [Actives]/[Underlyings] 分段；會完全照你輸入保留 #.）", lines=5)
 
                         with gr.Row():
                             btn_copy_to_stage2 = gr.Button("Copy Stage 1 Inputs to Stage 2")
@@ -2628,16 +2623,6 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         outputs=[register_status, login_username, register_password, register_password_confirm],
     )
     login_btn.click(
-        login_user,
-        inputs=[login_username, login_password, browser_session],
-        outputs=[browser_session, user_state, workspace_user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
-    )
-    login_password.submit(
-        login_user,
-        inputs=[login_username, login_password, browser_session],
-        outputs=[browser_session, user_state, workspace_user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
-    )
-    login_username.submit(
         login_user,
         inputs=[login_username, login_password, browser_session],
         outputs=[browser_session, user_state, workspace_user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
@@ -2850,11 +2835,6 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
         outputs=[admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
     )
 
-    demo.load(
-        restore_browser_session,
-        inputs=[browser_session],
-        outputs=[browser_session, user_state, workspace_user_state, current_user_banner, login_panel, app_panel, case_selector, case_list_preview, selected_case_id, login_status, login_username, login_password, admin_panel, admin_user_selector, admin_user_summary, admin_user_json, admin_cases_json, admin_status],
-    )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
