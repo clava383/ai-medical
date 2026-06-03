@@ -1027,18 +1027,24 @@ def parse_manual_diagnosis_text(diagnosis_text: str) -> tuple[str, str, str]:
     plan_text = build_plan_active_titles(active_text) if active_text != "UNKNOWN" else "UNKNOWN"
     return active_text, underlying_text, plan_text
 
+def ensure_dx_prefix(line: str) -> str:
+    stripped = (line or "").strip()
+    if not stripped:
+        return ""
+    if stripped.startswith("#."):
+        return stripped
+    if stripped.startswith("#"):
+        return "#. " + stripped.lstrip("#").strip()
+    return "#. " + stripped
+
+
 def extract_plan_title_from_dx_line(line: str) -> str:
     stripped = (line or "").strip()
     if not stripped or is_treatment_or_detail_line(stripped):
         return ""
-
-    body = stripped[2:].strip() if stripped.startswith("#.") else stripped.lstrip("#").strip()
-    for sep in [", status post", ", s/p", " status post", " s/p", ", with recurrence", " with recurrence"]:
-        idx = body.lower().find(sep)
-        if idx != -1:
-            body = body[:idx].strip(" ,;")
-            break
-    return body or stripped
+    # Plan diagnosis headers should keep the Stage 2 Diagnosis style with leading #.
+    # Do not strip procedure/treatment suffixes here; rely on user-curated diagnosis text.
+    return ensure_dx_prefix(stripped)
 
 
 def build_plan_active_titles(active_text: str) -> str:
@@ -1286,12 +1292,12 @@ Your task is NOT to write the admission note yet.
 
 You must generate TWO outputs:
 1. A concise current history timeline
-2. A practical pre-admission checklist in MIXED Chinese-English style
+2. A concise, practical pre-admission checklist in MIXED Chinese-English style
 
 GOALS:
 1. Organize currently available history into a clean timeline
-2. Identify missing critical information
-3. Generate practical questions to ask the patient
+2. Identify missing core admission history domains using a SIMPLE checklist
+3. Generate only non-duplicative, case-specific questions
 4. Suggest focused physical examination items
 
 STRICT RULES:
@@ -1309,11 +1315,21 @@ STRICT RULES:
 - Emergency department notes and consultation notes should be incorporated when provided
 - Consultation notes may contain multiple consults. For each consult, preserve the consultation date/time and specialty/department when available, and sort consult events chronologically.
 - If exact date is unavailable, use approximate wording such as "previously", "recently", "on admission"
-- For the checklist, you MUST actively check whether the provided information already includes the following domains:
-  past history, family history, surgical history, medication history, allergy history, smoking/alcohol/betel nut history, Chinese herbs or health supplements, TOCC if fever or suspected infection is mentioned
-- If any of the above domains are not clearly provided, you MUST remind the user to ask about them in the checklist
-- TOCC reminder should appear only when fever, chills, infection, URI symptoms, diarrhea, or similar infectious clues are mentioned
-- Do not claim a domain is missing if it was clearly provided in the input
+
+CORE HISTORY CHECKLIST RULES:
+- The checklist must use ONLY these core domains: PH, SH, MH, FH, ABC, Allergy, TOCC.
+- PH = Past history / 過去病史
+- SH = Surgical history / 手術史
+- MH = Medication history / 用藥史
+- FH = Family history / 家族史
+- ABC = Alcohol, Betel nut, Cigarette / 菸酒檳榔
+- Allergy = drug/food allergy / 過敏史
+- TOCC = travel, occupation, contact, cluster / 旅遊職業接觸群聚史
+- Mark each domain as either 已提供, 待補, or 視情況補問.
+- TOCC should be 視情況補問 unless fever, chills, infection, URI symptoms, diarrhea, or similar infectious clues are mentioned; if infectious clues are present and TOCC is not provided, mark TOCC as 待補.
+- Do NOT create separate repeated sections for missing information and questions that ask the same thing.
+- Suggested questions must NOT repeat the PH/SH/MH/FH/ABC/Allergy/TOCC checklist.
+- Suggested questions should focus only on case-specific information needed for this admission.
 
 OUTPUT FORMAT EXACTLY:
 
@@ -1323,16 +1339,19 @@ OUTPUT FORMAT EXACTLY:
 - item 3
 
 [Admission Checklist 入院前檢查清單]
+[Core History Checklist 核心病史]
+[ ] PH: 已提供 / 待補 / 視情況補問 - brief note
+[ ] SH: 已提供 / 待補 / 視情況補問 - brief note
+[ ] MH: 已提供 / 待補 / 視情況補問 - brief note
+[ ] FH: 已提供 / 待補 / 視情況補問 - brief note
+[ ] ABC: 已提供 / 待補 / 視情況補問 - brief note
+[ ] Allergy: 已提供 / 待補 / 視情況補問 - brief note
+[ ] TOCC: 已提供 / 待補 / 視情況補問 - brief note
 
-[Missing Information 待補資訊]
-[ ] item 1
-[ ] item 2
-[ ] item 3
-
-[Questions to Ask 建議追問]
-[ ] item 1
-[ ] item 2
-[ ] item 3
+[Case-specific Questions 個案重點追問]
+[ ] non-duplicative question 1
+[ ] non-duplicative question 2
+[ ] non-duplicative question 3
 
 [Focused PE Checklist 重點身體診察]
 [ ] item 1
@@ -1342,11 +1361,11 @@ OUTPUT FORMAT EXACTLY:
 STYLE RULES:
 - Timeline section must use bullet points beginning with -
 - Checklist items must each begin with [ ]
-- Keep each item short
-- Use mixed Chinese-English
-- Prioritize high-yield admission questions
-- Checklist must explicitly remind the user to補問 missing core history domains when absent
-- PE section should focus on meaningful positive findings to look for
+- Keep each item short but clinically specific
+- Use mixed Chinese + English
+- Avoid repeated questions across sections
+- Case-specific questions should be concise but detailed enough to be useful
+- PE section should focus on meaningful positive findings to look for during this admission
 """
 
 STAGE2_PROMPT = """
@@ -1375,6 +1394,8 @@ CRITICAL DIAGNOSIS TEMPLATE RULES
 - Do NOT add minor details, trivial procedures, dressing details, or low-yield historical information into the diagnosis lines.
 - For UNDERLYING diagnoses, keep diagnosis lines only unless a major treatment is absolutely essential to identify the disease.
 - Do NOT rewrite the diagnosis into prose.
+- Later, in Tentative Diagnosis, Assessment, and Plan headers, you MUST preserve the same #. diagnosis format.
+- Any section containing diagnoses should use diagnosis lines with leading #. according to the Stage 2 Diagnosis input.
 - Later, in Tentative Diagnosis and Assessment, you MUST copy the same diagnosis lines exactly and only separate them into Actives and Underlyings.
 
 CRITICAL PRESENT ILLNESS WRITING RULES
@@ -1396,8 +1417,9 @@ CRITICAL PRESENT ILLNESS WRITING RULES
 - In the FINAL paragraph of Present illness, summarize the current admission reason and the MOST RECENT IMPORTANT objective findings for this admission:
   • important labs
   • important imaging
-  • important abnormal physical examination findings, if provided
+  • important abnormal physical examination findings from this admission / on-admission PE, if provided
 - Only include objective findings that are actually given in the input.
+- Physical examination findings are from THIS admission. When provided, describe them as on-admission/current-admission PE findings rather than remote PE findings.
 - Prioritize the most recent and clinically important findings; do not list every minor value.
 - The final paragraph should therefore explain why this admission is happening now, what the recent key lab/image/PE results show, and then close with the required due-to sentence.
 - The ending sentence of Present illness MUST close with this structure:
@@ -1458,7 +1480,7 @@ diagnosis 2
 → ONLY output:
 
 [Physical Examination Positive Findings]
-- list only abnormal findings
+- list only abnormal findings from this admission / on-admission PE
 
 五. 檢驗紀錄(Laboratory Report)
 → DO NOT generate
@@ -1531,11 +1553,14 @@ RULES:
 
 【Plan】
 → ONLY for Actives
-→ Use ONLY the diagnosis names from [PLAN ACTIVE DIAGNOSES] as plan headers
-→ DO NOT include status post details, procedure history, recurrence sub-lines, or treatment suffixes in the plan headers
+→ Use ONLY [PLAN ACTIVE DIAGNOSES] as plan headers
+→ Each Plan header MUST keep the diagnosis format with leading #. exactly as provided whenever possible
+→ If a Plan header does not start with #., add #. before it
+→ Do NOT use unnumbered disease names as Plan headers
+→ Do NOT include treatment/detail sub-lines such as lines beginning with - or status post as separate Plan headers
 → FORMAT:
 
-Disease name
+#. Disease name
 - treatment
 - monitoring
 - supportive care
@@ -2120,7 +2145,7 @@ Labs / imaging:
 Additional history obtained:
 {additional_history}
 
-Physical examination findings:
+Physical examination findings from this admission / on-admission PE:
 {pe_findings}
 
 Extra recent pre-admission history (preserve date/time and integrate chronologically):
@@ -2554,7 +2579,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         timeline2 = gr.Textbox(label="Current History Timeline", lines=6)
                         labs2 = gr.Textbox(label="Labs / Imaging", lines=5)
                         add_hist = gr.Textbox(label="Additional History Obtained", lines=5)
-                        pe2 = gr.Textbox(label="Physical Examination Findings", lines=5)
+                        pe2 = gr.Textbox(label="Physical Examination Findings（本次入院 PE）", lines=5)
                         extra2 = gr.Textbox(label="額外病史（住院前近期病史；若有時間會依時間寫入）", lines=5)
                         admission_date2 = gr.Textbox(label="Admission Date（入院日期，建議 YYYY/MM/DD）", lines=2)
                         diagnosis2 = gr.Textbox(label="Diagnosis（可手動輸入；可用 [Actives]/[Underlyings] 分段；會完全照你輸入保留 #.）", lines=5)
