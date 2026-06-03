@@ -2557,7 +2557,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         history1 = gr.Textbox(label="Known History / Previous Admission Records（上次住院/過去資料，中英皆可）", lines=10)
                         outpatient1 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄：請含日期與門診醫師）", lines=6)
                         emergency1 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
-                        consult1 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄：請含時間與科別，可多筆）", lines=6)
+                        consult1 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄：請含時間與科別）", lines=6)
                         labs1 = gr.Textbox(label="Labs / Imaging (brief)", lines=5)
 
                         with gr.Row():
@@ -2575,14 +2575,14 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         history2 = gr.Textbox(label="Known History / Previous Admission Records（上次住院/過去資料）", lines=10)
                         outpatient2 = gr.Textbox(label="Outpatient Notes / OPD Record（門診紀錄：請含日期與門診醫師）", lines=6)
                         emergency2 = gr.Textbox(label="Emergency Notes / ER Record（急診紀錄）", lines=6)
-                        consult2 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄：請含時間與科別，可多筆）", lines=6)
+                        consult2 = gr.Textbox(label="Consultation Notes / Consult Record（照會紀錄：請含時間與科別）", lines=6)
                         timeline2 = gr.Textbox(label="Current History Timeline", lines=6)
                         labs2 = gr.Textbox(label="Labs / Imaging", lines=5)
                         add_hist = gr.Textbox(label="Additional History Obtained", lines=5)
                         pe2 = gr.Textbox(label="Physical Examination Findings（本次入院 PE）", lines=5)
-                        extra2 = gr.Textbox(label="額外病史（住院前近期病史；若有時間會依時間寫入）", lines=5)
+                        extra2 = gr.Textbox(label="額外病史", lines=5)
                         admission_date2 = gr.Textbox(label="Admission Date（入院日期，建議 YYYY/MM/DD）", lines=2)
-                        diagnosis2 = gr.Textbox(label="Diagnosis（可手動輸入；可用 [Actives]/[Underlyings] 分段；會完全照你輸入保留 #.）", lines=5)
+                        diagnosis2 = gr.Textbox(label="Diagnosis", lines=5)
 
                         with gr.Row():
                             btn_copy_to_stage2 = gr.Button("Copy Stage 1 Inputs to Stage 2")
