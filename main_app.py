@@ -2371,31 +2371,54 @@ def build_login_response(username: str, login_message: str, browser_payload: dic
             "",
         )
 
-    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, "Active", "", None)
     admin_visible = is_admin_user(username)
     admin_choices = admin_user_choices() if admin_visible else []
     browser_payload = browser_payload or {"username": username, "session_token": ""}
+
+    if admin_visible:
+        # Admin enters backend directly. Workspace stays hidden until a target user is loaded.
+        return (
+            browser_payload,
+            username,
+            "",
+            current_user_md(username),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(choices=[], value=None),
+            "### Cases\n\n_Admin 後台請先選擇使用者。_",
+            None,
+            login_message,
+            username,
+            "",
+            gr.update(visible=True),
+            gr.update(choices=admin_choices, value=None),
+            admin_account_md(username),
+            admin_account_details_json(username),
+            admin_account_details_json(username),
+            "已進入 admin 後台。請選擇使用者後載入帳號資訊。",
+        )
+
+    sidebar_dropdown, sidebar_md, selected_case_id = sync_sidebar(username, "Active", "", None)
     return (
         browser_payload,
         username,
         username,
         current_user_md(username),
         gr.update(visible=False),
-        gr.update(visible=not admin_visible),
+        gr.update(visible=True),
         sidebar_dropdown,
         sidebar_md,
         selected_case_id,
         login_message,
         username,
         "",
-        gr.update(visible=admin_visible),
-        gr.update(choices=admin_choices, value=None),
+        gr.update(visible=False),
+        gr.update(choices=[], value=None),
         "### 帳號資訊 / Session / 活動紀錄\n\n_尚未選擇使用者。_",
         "",
         "",
         "",
     )
-
 
 def login_user(username: str, password: str, browser_payload: dict | None = None):
     username = (username or "").strip()
@@ -2474,7 +2497,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     current_user_banner = gr.Markdown("### 尚未登入")
     login_status = gr.Markdown("")
     with gr.Column(visible=False) as admin_panel:
-        gr.Markdown("## Admin 後台 v8（帳號管理測試版）")
+        gr.Markdown("## Admin 後台 v9.2（帳號管理測試版）")
         admin_user_search = gr.Textbox(label="搜尋帳號", placeholder="輸入 username")
         admin_user_selector = gr.Dropdown(label="選擇使用者", choices=[], value=None)
         with gr.Row():
@@ -2582,7 +2605,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
                         pe2 = gr.Textbox(label="Physical Examination Findings（本次入院 PE）", lines=5)
                         extra2 = gr.Textbox(label="額外病史", lines=5)
                         admission_date2 = gr.Textbox(label="Admission Date（入院日期，建議 YYYY/MM/DD）", lines=2)
-                        diagnosis2 = gr.Textbox(label="Diagnosis", lines=5)
+                        diagnosis2 = gr.Textbox(label="Diagnosis [Active][Underlying]", lines=5)
 
                         with gr.Row():
                             btn_copy_to_stage2 = gr.Button("Copy Stage 1 Inputs to Stage 2")
