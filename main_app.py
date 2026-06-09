@@ -1377,6 +1377,7 @@ STRICT RULES:
 - DO NOT fabricate physical exam or lab
 - Use formal clinical English
 - Follow EXACT formatting rules
+- The patient's age and sex MUST come from "Patient demographics from Create Case"; do NOT infer age from history dates or note dates.
 - Known history usually contains previous admission records or past hospitalization data; treat it as background history, not the current admission, unless explicitly dated and relevant to this admission.
 - Outpatient notes, emergency notes, consultation notes, Stage 1 timeline, and extra recent pre-admission history are supporting materials and should be integrated when relevant
 - Outpatient notes may contain one or multiple clinic visits, each with visit date and outpatient physician. When provided, the Present illness MUST include EVERY OPD visit that has a date, in the appropriate chronological location, including the date and physician. A natural sentence such as "The patient visited Dr. [English surname]'s outpatient department on YYYY/MM/DD" is acceptable, but exact wording is flexible.
@@ -1439,6 +1440,7 @@ FORMAT REQUIREMENTS
 【Present illness】
 - MUST start with:
 "This is a XX-year-old man/woman with the following underlying diseases:"
+- XX-year-old and man/woman MUST be determined from "Patient demographics from Create Case".
 - Immediately after the above sentence, list the diagnoses in TWO groups using the exact format below.
 - Use diagnosis lines EXACTLY as provided in [FORCED ACTIVE DIAGNOSES] and [FORCED UNDERLYING DIAGNOSES].
 - Diagnosis is manually curated by the user. Preserve each diagnosis line EXACTLY as provided, including leading #. if present. Do NOT add, remove, renumber, or modify #/#. prefixes.
@@ -2113,7 +2115,14 @@ def admission_stage2(username, case_id, chief_complaint, admission_purpose, hist
         admission_date,
     )
 
+    patient_age = case.get("age", "") or "UNKNOWN"
+    patient_sex = case.get("sex", "") or "UNKNOWN"
+
     user_input = f"""
+Patient demographics from Create Case:
+Age at current encounter/admission: {patient_age}
+Sex: {patient_sex}
+
 Chief complaint: {chief_complaint}
 
 Admission purpose: {admission_purpose}
@@ -2333,14 +2342,6 @@ def copy_history_to_or(history_text):
     return history_text
 
 
-def autofill_discharge_from_weekly(weekly_output, current_discharge_weekly):
-    return current_discharge_weekly or weekly_output
-
-
-def autofill_or_history(stage2_history_text, stage1_history_text, current_or_history):
-    return current_or_history or stage2_history_text or stage1_history_text
-
-
 
 
 # =========================================================
@@ -2497,7 +2498,7 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     current_user_banner = gr.Markdown("### 尚未登入")
     login_status = gr.Markdown("")
     with gr.Column(visible=False) as admin_panel:
-        gr.Markdown("## Admin 後台 v9.2（帳號管理測試版）")
+        gr.Markdown("## Admin 後台 v9.3（帳號管理測試版）")
         admin_user_search = gr.Textbox(label="搜尋帳號", placeholder="輸入 username")
         admin_user_selector = gr.Dropdown(label="選擇使用者", choices=[], value=None)
         with gr.Row():
@@ -2644,7 +2645,6 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
 
                         with gr.Row():
                             discharge_copy = gr.Button("Copy Weekly Output Here")
-                            discharge_autofill = gr.Button("Auto-fill from Weekly")
                             discharge_btn = gr.Button("Generate Course and Treatment")
                             discharge_clear = gr.Button("Clear")
 
@@ -2658,7 +2658,6 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
 
                         with gr.Row():
                             or_copy_history = gr.Button("Copy Admission History Here")
-                            or_autofill = gr.Button("Auto-fill Admission History")
                             or_btn = gr.Button("Generate OR Briefing")
                             or_clear = gr.Button("Clear")
 
@@ -2845,11 +2844,6 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     weekly_clear.click(lambda: empty_weekly(), outputs=[weekly_week_range, weekly_assessment, weekly_lab, weekly_exam, weekly_prev, weekly_out])
 
     discharge_copy.click(copy_weekly_to_discharge, inputs=[weekly_out], outputs=[discharge_weekly])
-    discharge_autofill.click(
-        autofill_discharge_from_weekly,
-        inputs=[weekly_out, discharge_weekly],
-        outputs=[discharge_weekly],
-    )
     discharge_btn.click(
         discharge_note,
         inputs=[workspace_user_state, selected_case_id, discharge_weekly, discharge_events],
@@ -2865,11 +2859,6 @@ with gr.Blocks(title="Clinical AI Workspace", theme=gr.themes.Soft()) as demo:
     handoff_clear.click(lambda: empty_handoff(), outputs=[handoff_problem, handoff_assessment, handoff_plan, handoff_out])
 
     or_copy_history.click(copy_history_to_or, inputs=[history2], outputs=[or_history])
-    or_autofill.click(
-        autofill_or_history,
-        inputs=[history2, history1, or_history],
-        outputs=[or_history],
-    )
     or_btn.click(
         or_briefing,
         inputs=[workspace_user_state, selected_case_id, or_history, or_meds, or_surgery, or_extra],
